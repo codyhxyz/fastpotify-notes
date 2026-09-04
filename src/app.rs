@@ -313,6 +313,9 @@ pub struct App {
     note_buffer_dirty: bool,
     last_note_edit: Option<Instant>,
     last_notes_save: Instant,
+    /// Every time written in `note_buffer`, scanned when the text changes
+    /// rather than on every frame.
+    pub note_chips: Vec<(String, u32)>,
     /// The notes page's search box.
     pub notes_query: String,
     pub show_devices: bool,
@@ -606,6 +609,7 @@ impl App {
             note_buffer_dirty: false,
             last_note_edit: None,
             last_notes_save: Instant::now(),
+            note_chips: Vec::new(),
             notes_query: String::new(),
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,
@@ -1836,6 +1840,7 @@ impl App {
         self.note_uri = None;
         self.note_buffer.clear();
         self.note_buffer_dirty = false;
+        self.note_chips.clear();
         self.notes_query.clear();
     }
 
@@ -1860,6 +1865,10 @@ impl App {
     }
 
     /// Writes the editor's buffer into the notes it belongs to.
+    fn rescan_note_chips(&mut self) {
+        self.note_chips = crate::notes::timestamps(&self.note_buffer);
+    }
+
     fn commit_note(&mut self) {
         if !self.note_buffer_dirty {
             return;
@@ -1896,6 +1905,7 @@ impl App {
         self.note_uri = playing;
         self.note_buffer_dirty = false;
         self.last_note_edit = None;
+        self.rescan_note_chips();
     }
 
     fn save_notes(&mut self) {
@@ -5826,12 +5836,14 @@ impl App {
             Action::NoteEdited => {
                 self.note_buffer_dirty = true;
                 self.last_note_edit = Some(Instant::now());
+                self.rescan_note_chips();
             }
             Action::DeleteNote(uri) => {
                 self.notes.remove(&uri);
                 if self.note_uri.as_deref() == Some(uri.as_str()) {
                     self.note_buffer.clear();
                     self.note_buffer_dirty = false;
+                    self.rescan_note_chips();
                 }
                 self.save_notes();
             }

@@ -9,6 +9,7 @@ mod keys;
 pub mod library;
 pub mod login;
 mod lyrics;
+pub mod notes;
 pub mod player_bar;
 pub mod queue;
 pub mod search;
@@ -53,6 +54,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if app.show_lyrics_panel {
         lyrics::side_panel(app, ui);
+    }
+    if app.show_notes_panel {
+        notes::side_panel(app, ui);
     }
     central(app, ui);
     devices::popup(app, ctx);
@@ -202,6 +206,7 @@ pub(super) struct WindowControlsReservation {
     pub topbar_top: f32,
     pub queue_top: f32,
     pub lyrics_top: f32,
+    pub notes_top: f32,
 }
 
 const fn windows_chrome_visible(on_windows: bool, fullscreen: bool) -> bool {
@@ -218,6 +223,7 @@ const fn windows_controls_reservation(
     fullscreen: bool,
     queue: bool,
     lyrics: bool,
+    notes: bool,
     topbar_width: f32,
 ) -> WindowControlsReservation {
     let mut space = WindowControlsReservation {
@@ -225,12 +231,15 @@ const fn windows_controls_reservation(
         topbar_top: 0.0,
         queue_top: 0.0,
         lyrics_top: 0.0,
+        notes_top: 0.0,
     };
     if windows_chrome_visible(on_windows, fullscreen) {
         if queue {
             space.queue_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
         } else if lyrics {
             space.lyrics_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
+        } else if notes {
+            space.notes_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
         } else if topbar_width < WINDOWS_MIN_INLINE_TOPBAR_WIDTH {
             space.topbar_top = WINDOWS_WINDOW_CONTROLS_HEIGHT;
         } else {
@@ -244,10 +253,18 @@ pub(super) fn window_controls_reservation(
     ctx: &egui::Context,
     queue: bool,
     lyrics: bool,
+    notes: bool,
     topbar_width: f32,
 ) -> WindowControlsReservation {
     let fullscreen = ctx.input(|input| input.viewport().fullscreen.unwrap_or(false));
-    windows_controls_reservation(cfg!(windows), fullscreen, queue, lyrics, topbar_width)
+    windows_controls_reservation(
+        cfg!(windows),
+        fullscreen,
+        queue,
+        lyrics,
+        notes,
+        topbar_width,
+    )
 }
 
 /// Draws the Windows caption controls over the outermost top-right header.
@@ -439,38 +456,51 @@ mod window_chrome_tests {
 
     #[test]
     fn caption_space_belongs_to_the_outermost_header() {
-        let values = |queue, lyrics| {
-            let space = windows_controls_reservation(true, false, queue, lyrics, f32::INFINITY);
+        let values = |queue, lyrics, notes| {
+            let space =
+                windows_controls_reservation(true, false, queue, lyrics, notes, f32::INFINITY);
             [
                 space.topbar_width,
                 space.topbar_top,
                 space.queue_top,
                 space.lyrics_top,
+                space.notes_top,
             ]
         };
         assert_eq!(
-            values(false, false),
-            [WINDOWS_WINDOW_CONTROLS_WIDTH, 0.0, 0.0, 0.0]
+            values(false, false, false),
+            [WINDOWS_WINDOW_CONTROLS_WIDTH, 0.0, 0.0, 0.0, 0.0]
         );
         assert_eq!(
-            values(true, false),
-            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0]
+            values(true, false, false),
+            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0, 0.0]
         );
         assert_eq!(
-            values(false, true),
-            [0.0, 0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT]
+            values(false, true, false),
+            [0.0, 0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0]
         );
         assert_eq!(
-            values(true, true),
-            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0]
+            values(false, false, true),
+            [0.0, 0.0, 0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT]
         );
         assert_eq!(
-            windows_controls_reservation(true, true, true, true, f32::INFINITY),
+            values(true, true, true),
+            [0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0, 0.0],
+            "the queue is the outermost of the three"
+        );
+        assert_eq!(
+            values(false, true, true),
+            [0.0, 0.0, 0.0, WINDOWS_WINDOW_CONTROLS_HEIGHT, 0.0],
+            "and the lyrics come before the notes"
+        );
+        assert_eq!(
+            windows_controls_reservation(true, true, true, true, true, f32::INFINITY),
             WindowControlsReservation {
                 topbar_width: 0.0,
                 topbar_top: 0.0,
                 queue_top: 0.0,
                 lyrics_top: 0.0,
+                notes_top: 0.0,
             }
         );
     }
@@ -478,12 +508,13 @@ mod window_chrome_tests {
     #[test]
     fn minimum_windows_window_stacks_caption_space_above_the_topbar() {
         let available = 760.0 - 250.0;
-        let space = windows_controls_reservation(true, false, false, false, available);
+        let space = windows_controls_reservation(true, false, false, false, false, available);
         assert_eq!(space.topbar_width, 0.0);
         assert_eq!(space.topbar_top, WINDOWS_WINDOW_CONTROLS_HEIGHT);
 
         let inline = windows_controls_reservation(
             true,
+            false,
             false,
             false,
             false,

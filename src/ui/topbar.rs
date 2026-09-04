@@ -54,6 +54,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ui.ctx(),
         app.show_queue_panel,
         app.show_lyrics_panel,
+        app.show_notes_panel,
         width,
     );
     // Where the titlebar used to be: the bar grows upwards into that space and

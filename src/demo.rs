@@ -596,6 +596,52 @@ fn sample_lyrics() -> crate::lyrics::Lyrics {
     }
 }
 
+/// Three notes to fill the panel and the page, the first for the song the
+/// demo is playing so its chips have somewhere to seek to.
+#[cfg(any(test, feature = "demo"))]
+pub fn sample_notes(app: &mut App) {
+    let written = [
+        (
+            0,
+            "The drop at 1:04 is the whole song. Mix out after 3:30, it \
+             sits under the Overmono edit without a fight.",
+            "2026-09-03T18:22:10Z",
+        ),
+        (
+            3,
+            "Second verse is the one. Whatever the pedal is doing at 2:12, \
+             find out.",
+            "2026-09-02T09:14:00Z",
+        ),
+        (
+            7,
+            "Put this after the Marconi Union in the driving playlist.",
+            "2026-08-28T21:05:00Z",
+        ),
+    ];
+    for (index, text, at) in written {
+        let track = track(index);
+        app.notes.merge(
+            &track.uri,
+            crate::notes::Note {
+                text: text.to_string(),
+                updated_at: at.to_string(),
+                track: crate::notes::TrackInfo {
+                    title: track.name.clone(),
+                    artists: track.artists.iter().map(|a| a.name.clone()).collect(),
+                    album: track
+                        .album
+                        .as_ref()
+                        .map(|album| album.name.clone())
+                        .unwrap_or_default(),
+                    art_url: track.image(640).map(str::to_string),
+                    duration_ms: track.duration_ms,
+                },
+            },
+        );
+    }
+}
+
 /// Applies `--demo-page` and `--demo-show`.
 #[cfg(feature = "demo")]
 pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
@@ -716,6 +762,10 @@ pub fn apply_flags(app: &mut App, page: Option<&str>, show: Option<&str>) {
                 app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
                 app.lyrics_following = true;
                 app.show_lyrics_panel = true;
+            }
+            "notes" => {
+                sample_notes(app);
+                app.actions.push(Action::ShowNotesPanel);
             }
             // Titles in scripts the interface font does not cover.
             "scripts" => {
@@ -1254,6 +1304,19 @@ mod tests {
         app.settings.sidebar_visible = true;
         app.show_queue_panel = true;
         app.show_devices = true;
+        frame(&ctx, &mut app);
+        app.show_queue_panel = false;
+        app.show_devices = false;
+        sample_notes(&mut app);
+        app.actions.push(Action::ShowNotesPanel);
+        frame(&ctx, &mut app);
+        assert!(app.show_notes_panel);
+        assert!(
+            !app.note_chips.is_empty(),
+            "the sample note's times are offered as chips"
+        );
+        app.show_notes_panel = false;
+        app.show_queue_panel = true;
         frame(&ctx, &mut app);
         // Draw the Playing next section with a manual queue row.
         if let Loadable::Loaded(queue) = &app.queue

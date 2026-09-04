@@ -559,4 +559,20 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>) {
     {
         app.actions.push(Action::ToggleLyricsPanel);
     }
+    if theme::icon_button(
+        ui,
+        Icon::SquarePen,
+        18.0,
+        if app.show_notes_panel {
+            palette.accent
+        } else {
+            palette.secondary
+        },
+        palette.text,
+        "Notes",
+    )
+    .clicked()
+    {
+        app.actions.push(Action::ToggleNotesPanel);
+    }
 }
