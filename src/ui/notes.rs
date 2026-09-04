@@ -9,8 +9,8 @@ use crate::theme::{self, Icon};
 
 use super::widgets;
 
-/// Height of one line in the editor, for filling the panel with rows.
-const LINE_HEIGHT: f32 = 19.0;
+/// The size the note is written at.
+const NOTE_SIZE: f32 = 14.0;
 const ROW_HEIGHT: f32 = 64.0;
 const COVER: f32 = 40.0;
 /// Room on the right of a row for when the note was last written in.
@@ -99,8 +99,11 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         ui.add_space(8.0);
     }
 
+    // Enough rows to reach the bottom of the panel, so the editor is the
+    // whole rest of it and a click anywhere in it lands in the text.
     let space = ui.available_height();
-    let rows = (((space - 24.0) / LINE_HEIGHT).floor() as usize).max(3);
+    let line = ui.ctx().fonts_mut(|fonts| fonts.row_height(&theme::regular(NOTE_SIZE)));
+    let rows = (((space - 20.0) / line).floor() as usize).max(3);
     egui::ScrollArea::vertical()
         .id_salt("note-scroll")
         .auto_shrink([false, false])
@@ -116,7 +119,7 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                             .hint_text(
                                 egui::RichText::new("Write about this song").color(palette.dim),
                             )
-                            .font(theme::regular(14.0))
+                            .font(theme::regular(NOTE_SIZE))
                             .text_color(palette.text)
                             .frame(egui::Frame::NONE)
                             .desired_width(f32::INFINITY)
