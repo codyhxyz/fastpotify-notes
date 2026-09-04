@@ -21,6 +21,8 @@ pub enum Page {
     Artist(String),
     Show(String),
     Queue,
+    /// Every note written here, searchable.
+    Notes,
     Settings,
 }
 
@@ -40,6 +42,7 @@ impl Page {
             Page::Artist(id) => format!("artist:{id}"),
             Page::Show(id) => format!("show:{id}"),
             Page::Queue => "queue".into(),
+            Page::Notes => "notes".into(),
             Page::Settings => "settings".into(),
         }
     }
@@ -55,6 +58,7 @@ impl Page {
             "podcasts" => Page::Podcasts,
             "episodes" => Page::Episodes,
             "queue" => Page::Queue,
+            "notes" => Page::Notes,
             "settings" => Page::Settings,
             other => {
                 let (kind, id) = other.split_once(':')?;

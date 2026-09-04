@@ -2632,6 +2632,8 @@ impl App {
                 self.request_contains(vec![format!("spotify:show:{id}")]);
             }
             Page::Queue => self.refresh_queue(true),
+            // The notes are already here, on disk.
+            Page::Notes => {}
             Page::Settings => {}
         }
     }

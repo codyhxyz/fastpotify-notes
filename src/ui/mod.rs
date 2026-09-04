@@ -116,7 +116,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
             if let Some(tint) = tint {
                 let strength = if matches!(
                     app.page(),
-                    Page::Home | Page::Search | Page::Settings | Page::Queue
+                    Page::Home | Page::Search | Page::Settings | Page::Queue | Page::Notes
                 ) {
                     0.45
                 } else {
@@ -155,6 +155,7 @@ fn central(app: &mut App, ui: &mut egui::Ui) {
                                 Page::Artist(id) => artist::show(app, ui, &id),
                                 Page::Show(id) => show::show(app, ui, &id),
                                 Page::Queue => queue::page(app, ui),
+                                Page::Notes => notes::page(app, ui),
                                 Page::Settings => settings::show(app, ui),
                             }
                         });
