@@ -1,4 +1,8 @@
-# Fastpotify
+# Fastpotify Notes
+
+A fork of [Fastpotify](https://github.com/crmne/fastpotify) by
+[crmne](https://github.com/crmne) that adds a note for every song. Everything
+else is upstream Fastpotify, and the app is still called Fastpotify.
 
 **Spotify, native and fast.** Fastpotify is a Spotify client written in
 Rust with [egui](https://github.com/emilk/egui). It plays music through

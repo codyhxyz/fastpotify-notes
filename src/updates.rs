@@ -5,7 +5,10 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-const LATEST_RELEASE_URL: &str = "https://api.github.com/repos/crmne/fastpotify/releases/latest";
+/// This fork's own releases. Upstream's would offer an "update" that
+/// replaces this build with one that has no notes in it.
+const LATEST_RELEASE_URL: &str =
+    "https://api.github.com/repos/codyhxyz/fastpotify-notes/releases/latest";
 
 /// Update-check interval.
 pub const CHECK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
