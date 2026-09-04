@@ -463,13 +463,15 @@ impl SessionState {
     }
 }
 
+/// Puts `temporary` in `path`'s place in one step, so a file is never
+/// half-written. Shared with [`crate::notes`].
 #[cfg(not(windows))]
-fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
     std::fs::rename(temporary, path)
 }
 
 #[cfg(windows)]
-fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
+pub(crate) fn replace_file(temporary: &Path, path: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
         MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,

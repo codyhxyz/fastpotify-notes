@@ -64,6 +64,13 @@ impl AppDirs {
         self.state.join("history.json")
     }
 
+    /// What was written about each song, per account. Unlike everything
+    /// else here, this is the listener's own writing: it cannot be fetched
+    /// again from anywhere. See [`crate::notes`].
+    pub fn notes_file(&self, account_id: &str) -> PathBuf {
+        self.state.join("notes").join(format!("{account_id}.json"))
+    }
+
     pub fn shared_web_token_file(&self) -> PathBuf {
         self.state.join("shared_web_api_token.json")
     }
