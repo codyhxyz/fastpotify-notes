@@ -186,20 +186,33 @@ impl Notes {
         }
     }
 
-    /// Merges an exported note in, newest `updated_at` winning. Returns
-    /// whether this note is now the one on file.
+    /// Merges a note in, the newer `updated_at` winning. Returns whether
+    /// this note is now the one on file.
     pub fn merge(&mut self, uri: &str, note: Note) -> bool {
         if note.text.trim().is_empty() {
             return false;
         }
         if let Some(held) = self.notes.get(uri)
-            && held.updated_at >= note.updated_at
+            && !is_after(&note.updated_at, &held.updated_at)
         {
             return false;
         }
         self.notes.insert(uri.to_string(), note);
         self.dirty = true;
         true
+    }
+}
+
+/// Whether `candidate` was written after `held`. Compared as instants
+/// rather than as text, because the web app's times carry fractional
+/// seconds and Fastpotify's do not.
+fn is_after(candidate: &str, held: &str) -> bool {
+    match (
+        candidate.parse::<jiff::Timestamp>(),
+        held.parse::<jiff::Timestamp>(),
+    ) {
+        (Ok(candidate), Ok(held)) => candidate > held,
+        _ => candidate > held,
     }
 }
 
@@ -306,6 +319,80 @@ pub fn strip_html(html: &str) -> String {
         lines.push(if line.trim().is_empty() { "" } else { line });
     }
     lines.join("\n").trim().to_string()
+}
+
+/// One row of the export My Song Notes writes from its Settings page.
+///
+/// The export carries `track_name`, `note_html` and `note_text`; the
+/// aliases accept a raw dump of the app's own list endpoint too, which
+/// names the same fields `name` and `note`.
+#[derive(serde::Deserialize)]
+struct Exported {
+    track_id: String,
+    #[serde(default, alias = "name")]
+    track_name: String,
+    #[serde(default)]
+    artists: Vec<String>,
+    /// Already plain text, and preferred when it is there.
+    #[serde(default)]
+    note_text: Option<String>,
+    #[serde(default, alias = "note")]
+    note_html: Option<String>,
+    #[serde(default)]
+    updated_at: String,
+    #[serde(default)]
+    image_url: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Export {
+    #[serde(default)]
+    notes: Vec<Exported>,
+}
+
+/// Reads an export from My Song Notes into `notes`, the newer of the two
+/// notes for a song winning, and answers how many landed.
+///
+/// The export has no album and no track length, so those stay empty until
+/// the song plays here and the note is written again.
+pub fn import(notes: &mut Notes, path: &Path) -> anyhow::Result<usize> {
+    let text = std::fs::read_to_string(path)?;
+    let export: Export = serde_json::from_str(&text)?;
+    let now = jiff::Timestamp::now().to_string();
+    let mut landed = 0;
+    for row in export.notes {
+        if row.track_id.is_empty() {
+            continue;
+        }
+        let written = match row.note_text {
+            Some(text) if !text.trim().is_empty() => text.trim().to_string(),
+            _ => strip_html(row.note_html.as_deref().unwrap_or_default()),
+        };
+        if written.is_empty() {
+            continue;
+        }
+        let uri = format!("spotify:track:{}", row.track_id);
+        let updated_at = if row.updated_at.trim().is_empty() {
+            now.clone()
+        } else {
+            row.updated_at
+        };
+        let note = Note {
+            text: written,
+            updated_at,
+            track: TrackInfo {
+                title: row.track_name,
+                artists: row.artists,
+                album: String::new(),
+                art_url: row.image_url.filter(|url| !url.is_empty()),
+                duration_ms: 0,
+            },
+        };
+        if notes.merge(&uri, note) {
+            landed += 1;
+        }
+    }
+    Ok(landed)
 }
 
 #[cfg(test)]
@@ -485,6 +572,94 @@ mod tests {
         assert_eq!(timestamps("10:00")[0].1, 600_000);
         assert_eq!(timestamps("0:07")[0].1, 7_000);
         assert_eq!(timestamps("1:04")[0].1, 64_000);
+    }
+
+    /// The export from the web app's Settings page lands as notes.
+    #[test]
+    fn an_export_from_the_web_app_lands_as_notes() {
+        let dir = std::env::temp_dir().join(format!("fastpotify-import-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("song-notes.json");
+        std::fs::write(
+            &path,
+            r#"{
+              "exported_at": "2026-09-03T18:30:00.000Z",
+              "count": 3,
+              "notes": [
+                {
+                  "track_id": "4uLU6hMCjMI75M1A2tKUQC",
+                  "track_name": "Long Way Home",
+                  "artists": ["Marconi Union"],
+                  "spotify_url": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
+                  "note_html": "<p>drop at <b>1:04</b></p>",
+                  "note_text": "drop at 1:04",
+                  "updated_at": "2026-09-03T18:22:10.512Z"
+                },
+                {
+                  "track_id": "onlyhtml",
+                  "track_name": "Tides",
+                  "artists": [],
+                  "note_html": "<p>second verse</p>",
+                  "updated_at": "2026-08-01T00:00:00.000Z"
+                },
+                {
+                  "track_id": "empty",
+                  "track_name": "Nothing",
+                  "note_html": "<p><br></p>",
+                  "updated_at": "2026-08-01T00:00:00.000Z"
+                }
+              ]
+            }"#,
+        )
+        .unwrap();
+
+        let mut notes = Notes::default();
+        assert_eq!(
+            import(&mut notes, &path).unwrap(),
+            2,
+            "the blank one is not a note"
+        );
+        assert_eq!(
+            notes.text("spotify:track:4uLU6hMCjMI75M1A2tKUQC"),
+            "drop at 1:04"
+        );
+        assert_eq!(
+            notes.text("spotify:track:onlyhtml"),
+            "second verse",
+            "html is used when there is no plain text"
+        );
+        let note = notes.get("spotify:track:4uLU6hMCjMI75M1A2tKUQC").unwrap();
+        assert_eq!(note.track.title, "Long Way Home");
+        assert_eq!(note.track.artists, vec!["Marconi Union".to_string()]);
+
+        // Importing the same file again changes nothing.
+        assert_eq!(import(&mut notes, &path).unwrap(), 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// An import never overwrites a note written here more recently, even
+    /// though the web app's times carry fractional seconds and ours do not.
+    #[test]
+    fn an_import_leaves_a_newer_local_note_alone() {
+        let mut notes = Notes::default();
+        notes.set(
+            "spotify:track:a",
+            "written here",
+            info(),
+            "2026-09-03T18:22:11Z".parse().unwrap(),
+        );
+        let older = Note {
+            text: "from the web".into(),
+            updated_at: "2026-09-03T18:22:10.999Z".into(),
+            track: info(),
+        };
+        assert!(!notes.merge("spotify:track:a", older));
+        let newer = Note {
+            text: "from the web".into(),
+            updated_at: "2026-09-03T18:22:11.001Z".into(),
+            track: info(),
+        };
+        assert!(notes.merge("spotify:track:a", newer));
     }
 
     /// The web editor's markup comes out as the lines it stood for.

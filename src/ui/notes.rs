@@ -102,7 +102,9 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
     // Enough rows to reach the bottom of the panel, so the editor is the
     // whole rest of it and a click anywhere in it lands in the text.
     let space = ui.available_height();
-    let line = ui.ctx().fonts_mut(|fonts| fonts.row_height(&theme::regular(NOTE_SIZE)));
+    let line = ui
+        .ctx()
+        .fonts_mut(|fonts| fonts.row_height(&theme::regular(NOTE_SIZE)));
     let rows = (((space - 20.0) / line).floor() as usize).max(3);
     egui::ScrollArea::vertical()
         .id_salt("note-scroll")

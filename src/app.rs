@@ -318,6 +318,8 @@ pub struct App {
     pub note_chips: Vec<(String, u32)>,
     /// The notes page's search box.
     pub notes_query: String,
+    /// An export from My Song Notes waiting for an account to land in.
+    import_notes: Option<std::path::PathBuf>,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -611,6 +613,7 @@ impl App {
             last_notes_save: Instant::now(),
             note_chips: Vec::new(),
             notes_query: String::new(),
+            import_notes: None,
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
@@ -1829,6 +1832,9 @@ impl App {
         self.note_uri = None;
         self.note_buffer.clear();
         self.note_buffer_dirty = false;
+        if let Some(path) = self.import_notes.take() {
+            self.import_notes_from(&path);
+        }
         self.follow_note();
     }
 
@@ -1924,6 +1930,29 @@ impl App {
     fn flush_notes(&mut self) {
         self.commit_note();
         self.save_notes();
+    }
+
+    /// Reads an export from My Song Notes once there is an account to
+    /// read it into. The account id only exists after Spotify answers with
+    /// the profile, so this waits rather than guessing at start-up.
+    pub fn import_notes_later(&mut self, path: std::path::PathBuf) {
+        log::info!("importing notes from {} once signed in", path.display());
+        self.import_notes = Some(path);
+    }
+
+    fn import_notes_from(&mut self, path: &std::path::Path) {
+        match crate::notes::import(&mut self.notes, path) {
+            Ok(0) => self.toast("Those notes are already here".to_string()),
+            Ok(count) => {
+                log::info!("imported {count} notes from {}", path.display());
+                self.toast(format!("Imported {count} notes"));
+                self.save_notes();
+            }
+            Err(error) => {
+                log::warn!("could not import {}: {error}", path.display());
+                self.toast_error(format!("Couldn't import those notes: {error}"));
+            }
+        }
     }
 
     fn close_notes_panel(&mut self) {

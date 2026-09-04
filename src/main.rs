@@ -28,6 +28,11 @@ struct Cli {
     #[arg(short, long)]
     verbose: bool,
 
+    /// Read a My Song Notes export into this account's notes, once, at the
+    /// next sign-in. The newer of the two notes for a song wins.
+    #[arg(long, value_name = "PATH")]
+    import_notes: Option<std::path::PathBuf>,
+
     /// Start with sample data and no Spotify connection (for screenshots).
     #[cfg(feature = "demo")]
     #[arg(long)]
@@ -376,6 +381,9 @@ fn main() -> eframe::Result<()> {
     }
     if let Some(uri) = link {
         app.open_link(uri);
+    }
+    if let Some(path) = cli.import_notes {
+        app.import_notes_later(path);
     }
     #[cfg(feature = "demo")]
     if demo {
