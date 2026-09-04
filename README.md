@@ -49,6 +49,15 @@ everyday use, and connection details.
   in it, whether it is running or not. `open.spotify.com` addresses go
   through the browser, which hands them to the same handler.
 - **Queue** as a side panel or a page; add anything to it from a row menu.
+- **A note for every song.** `N` opens a panel that follows what is
+  playing and saves as you write. Any time you write in it (`1:04`,
+  `12:05`) becomes a button that seeks there. **All notes** lists every
+  one of them, newest first, searchable across the song, the artists, and
+  the writing. Notes are yours, so they live in the state directory
+  (`~/.local/state/fastpotify/notes/<account-id>.json` on Linux) and are
+  the one file here that is not safe to delete. Bring notes over from
+  [My Song Notes](https://songnotes.codyh.xyz) with
+  `fastpotify --import-notes song-notes.json`.
 - **Resumes the last session.** On startup, the last song is paused where it
   stopped. Play resumes it, and the other playback controls work before it
   starts.
@@ -188,6 +197,7 @@ those things, and [CONTRIBUTING.md](CONTRIBUTING.md) prohibits them.
 | `M` | Mute |
 | `S` / `R` | Shuffle / cycle repeat |
 | `Q` | Queue panel |
+| `L` / `N` | Lyrics / notes panel |
 | `Ctrl+F` or `/` | Search |
 | `Ctrl+B` | Show or hide the sidebar |
 | `Alt+←` / `Alt+→` | Back or forward |

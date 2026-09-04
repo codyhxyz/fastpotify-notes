@@ -18,12 +18,17 @@ Fastpotify follows each platform's conventions. On Linux:
 | Playback credential | `~/.local/state/fastpotify/credentials/` | Yes, you approve playback again |
 | Last session | `~/.local/state/fastpotify/session.json` | Yes |
 | Play history | `~/.local/state/fastpotify/history.json` | Yes |
+| Notes | `~/.local/state/fastpotify/notes/<account-id>.json` | No, you lose your notes |
 | Audio cache | `~/.cache/fastpotify/audio/` | Always |
 | Artwork cache | `~/.cache/fastpotify/art/` | Always |
 | Lyrics cache | `~/.cache/fastpotify/lyrics/` | Always |
 | Account-scoped playlist page cache | `~/.cache/fastpotify/playlists/<account-id>/` | Always |
 | Last run's log | `~/.local/state/fastpotify/fastpotify.log` | Always |
 | Crash log | `~/.local/state/fastpotify/panic.log` | Always |
+
+Your notes are the one file here that nothing can rebuild: everything
+else comes back from Spotify or from your preferences, and that one is
+your own writing. Back it up like any other document.
 
 Clearing caches never signs you out; credentials live in *state*, not
 *cache*. Web API token files are written with owner-only permissions.
@@ -72,6 +77,7 @@ main fields are:
 | `accent_from_art` | `true` | Tint pages with album art |
 | `sidebar_compact` | `false` | Names only in the library sidebar, no covers |
 | `tracklist_compact` | `false` | One-line track rows without covers |
+| `notes_width` | `360` | Width of the notes panel, in points |
 | `winamp_window` | `false` | The window is the Winamp mini player |
 | `skin` | none | File or folder name in the skins folder; blank uses the built-in skin |
 | `skin_scale` | by display | Screen pixels per skin pixel, 1 to 4 |
@@ -107,6 +113,8 @@ fastpotify [OPTIONS] [LINK]
                         open.spotify.com address
   --device-name <NAME>  Spotify Connect name for this session
   -v, --verbose         More logs from librespot and the API client
+  --import-notes <PATH> Read a My Song Notes export into your notes at the
+                        next sign-in
 ```
 
 A link goes to the running Fastpotify when there is one, which then opens
@@ -121,12 +129,12 @@ crash, attach `panic.log` too.
 
 Builds made with `cargo build --features demo` accept `--demo`, which loads
 sample data for screenshots and interface work. Demo mode never writes
-settings.
+settings or notes.
 
 `--demo-page` opens a page, such as `home`, `playlist:pl1`, or `artist:art0`,
 and `--demo-show` adds surfaces on top of it: a comma separated list of
-`queue`, `devices`, `shortcuts`, `premium`, `create`, `duplicate`, `light`,
-`focus`, `winamp`, `playlist`, `eq`, `eq-shade`, and `compact`.
+`queue`, `devices`, `shortcuts`, `premium`, `create`, `duplicate`, `notes`,
+`light`, `focus`, `winamp`, `playlist`, `eq`, `eq-shade`, and `compact`.
 
 `--demo-shot <PATH>` writes the window to a PNG and exits, which is useful for
 making deterministic screenshots for these pages:
