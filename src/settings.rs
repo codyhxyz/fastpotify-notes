@@ -79,6 +79,10 @@ pub struct Settings {
     pub sidebar_compact: bool,
     pub sidebar_width: f32,
     pub lyrics_width: f32,
+    /// Width of the notes panel. Defaulted so a settings file written
+    /// before notes existed still loads.
+    #[serde(default = "default_notes_width")]
+    pub notes_width: f32,
     pub queue_width: f32,
     /// Use compact single-line rows without cover art in track lists.
     pub tracklist_compact: bool,
@@ -174,6 +178,7 @@ impl Default for Settings {
             sidebar_compact: false,
             sidebar_width: 250.0,
             lyrics_width: 360.0,
+            notes_width: default_notes_width(),
             queue_width: 360.0,
             tracklist_compact: false,
             search_history: Vec::new(),
@@ -215,6 +220,10 @@ impl Default for Settings {
 
 fn default_buffer_ms() -> u32 {
     crate::sink::DEFAULT_BUFFER_MS
+}
+
+fn default_notes_width() -> f32 {
+    360.0
 }
 
 impl Settings {

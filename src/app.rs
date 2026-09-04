@@ -36,6 +36,14 @@ const SEARCH_DEBOUNCE: Duration = Duration::from_millis(280);
 /// matching what librespot does during playback.
 const RESTART_BEFORE_PREVIOUS: u32 = 3_000;
 
+/// A note settles this long after the last keystroke before it is written
+/// into the store, and the editor holds its place on the playing song for
+/// the same span so a song that runs out mid-sentence does not split the
+/// sentence between two notes.
+const NOTE_SETTLE: Duration = Duration::from_secs(1);
+/// Shortest gap between two writes of the notes file.
+const NOTES_SAVE_INTERVAL: Duration = Duration::from_secs(2);
+
 const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// Match other interface animations. egui subtracts the predicted frame time
 /// from delayed repaints, so 33 ms drives roughly one frame per 16 ms.
@@ -291,6 +299,22 @@ pub struct App {
     /// the first line), so it moves once per change; `None` until it has
     /// positioned itself at all for this track.
     pub lyrics_line_shown: Option<Option<usize>>,
+    pub show_notes_panel: bool,
+    /// Every note this account has written. See [`crate::notes`].
+    pub notes: crate::notes::Notes,
+    /// The account the notes in memory were read for.
+    notes_loaded_for: Option<String>,
+    /// The note being written, held apart from the store because egui's
+    /// editor needs the string itself.
+    pub note_buffer: String,
+    /// The song `note_buffer` belongs to.
+    pub note_uri: Option<String>,
+    /// The buffer has been typed into since it was last written down.
+    note_buffer_dirty: bool,
+    last_note_edit: Option<Instant>,
+    last_notes_save: Instant,
+    /// The notes page's search box.
+    pub notes_query: String,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -574,6 +598,15 @@ impl App {
             dialog: None,
             show_queue_panel: session.queue_open.unwrap_or(false),
             show_lyrics_panel: false,
+            show_notes_panel: false,
+            notes: crate::notes::Notes::default(),
+            notes_loaded_for: None,
+            note_buffer: String::new(),
+            note_uri: None,
+            note_buffer_dirty: false,
+            last_note_edit: None,
+            last_notes_save: Instant::now(),
+            notes_query: String::new(),
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
@@ -1350,6 +1383,7 @@ impl App {
                 self.rootlist_cache = None;
                 self.editable_by_grant.clear();
                 self.session_dirty = true;
+                self.forget_notes();
                 self.reset_data();
             }
             AuthStatus::Failed(message) => {
@@ -1740,6 +1774,7 @@ impl App {
         if self.show_lyrics_panel {
             self.request_lyrics();
         }
+        self.follow_note();
     }
 
     /// Asks for the playing track's lyrics unless they are here or on the
@@ -1774,6 +1809,119 @@ impl App {
                 duration_ms: now.duration_ms,
             },
         })));
+    }
+
+    /// Reads this account's notes, once. Signing in as somebody else
+    /// reads theirs instead.
+    fn load_notes(&mut self) {
+        let Some(id) = self.user_id().map(str::to_string) else {
+            return;
+        };
+        if self.notes_loaded_for.as_deref() == Some(id.as_str()) {
+            return;
+        }
+        self.notes = crate::notes::Notes::load(&self.dirs.notes_file(&id));
+        self.notes_loaded_for = Some(id);
+        self.note_uri = None;
+        self.note_buffer.clear();
+        self.note_buffer_dirty = false;
+        self.follow_note();
+    }
+
+    /// Forgets the notes in memory without touching the file: they belong
+    /// to the account that signed out, not to whoever signs in next.
+    fn forget_notes(&mut self) {
+        self.notes = crate::notes::Notes::default();
+        self.notes_loaded_for = None;
+        self.note_uri = None;
+        self.note_buffer.clear();
+        self.note_buffer_dirty = false;
+        self.notes_query.clear();
+    }
+
+    /// What the note should remember about the song it belongs to. The
+    /// playing song when it is the one being written about, and otherwise
+    /// whatever the note already knew, so editing an old note from the
+    /// notes page does not blank its cover.
+    fn note_track(&self, uri: &str) -> crate::notes::TrackInfo {
+        if let Some(now) = self.now_playing().filter(|now| now.uri == uri) {
+            return crate::notes::TrackInfo {
+                title: now.title,
+                artists: now.artists.iter().map(|a| a.name.clone()).collect(),
+                album: now.album_name,
+                art_url: now.art_url.or(now.art_small),
+                duration_ms: now.duration_ms,
+            };
+        }
+        self.notes
+            .get(uri)
+            .map(|note| note.track.clone())
+            .unwrap_or_default()
+    }
+
+    /// Writes the editor's buffer into the notes it belongs to.
+    fn commit_note(&mut self) {
+        if !self.note_buffer_dirty {
+            return;
+        }
+        self.note_buffer_dirty = false;
+        let Some(uri) = self.note_uri.clone() else {
+            return;
+        };
+        let track = self.note_track(&uri);
+        let text = std::mem::take(&mut self.note_buffer);
+        self.notes.set(&uri, &text, track, jiff::Timestamp::now());
+        self.note_buffer = text;
+    }
+
+    /// Keeps the editor on the playing song, committing what was written
+    /// about the one before it. A keystroke in the last second holds the
+    /// swap until the writer stops.
+    fn follow_note(&mut self) {
+        let playing = self.now_playing().map(|now| now.uri);
+        if self.note_uri == playing {
+            return;
+        }
+        if self
+            .last_note_edit
+            .is_some_and(|at| at.elapsed() < NOTE_SETTLE)
+        {
+            return;
+        }
+        self.commit_note();
+        self.note_buffer = playing
+            .as_deref()
+            .map(|uri| self.notes.text(uri).to_string())
+            .unwrap_or_default();
+        self.note_uri = playing;
+        self.note_buffer_dirty = false;
+        self.last_note_edit = None;
+    }
+
+    fn save_notes(&mut self) {
+        self.last_notes_save = Instant::now();
+        if self.offline {
+            // Demo data must never overwrite what the person actually wrote.
+            return;
+        }
+        let Some(id) = self.notes_loaded_for.clone() else {
+            return;
+        };
+        self.notes.save(&self.dirs.notes_file(&id));
+    }
+
+    /// Writes down and saves everything the editor is holding.
+    fn flush_notes(&mut self) {
+        self.commit_note();
+        self.save_notes();
+    }
+
+    fn close_notes_panel(&mut self) {
+        if !self.show_notes_panel {
+            return;
+        }
+        self.show_notes_panel = false;
+        self.flush_notes();
     }
 
     /// Pushes the Winamp window's always-on-top level to the live window.
@@ -1893,6 +2041,18 @@ impl App {
         }
         if self.session_dirty && self.last_session_save.elapsed() > Duration::from_secs(2) {
             self.save_session();
+        }
+        if self.note_buffer_dirty
+            && self
+                .last_note_edit
+                .is_none_or(|at| at.elapsed() > NOTE_SETTLE)
+        {
+            self.commit_note();
+        }
+        // A swap held back by typing happens as soon as the typing stops.
+        self.follow_note();
+        if self.notes.is_dirty() && self.last_notes_save.elapsed() > NOTES_SAVE_INTERVAL {
+            self.save_notes();
         }
     }
 
@@ -3130,6 +3290,7 @@ impl App {
                         self.editable_by_grant.clear();
                     }
                     self.user = Some(user);
+                    self.load_notes();
                     let page = self.page().clone();
                     self.ensure_loaded(page);
                     if let Some(now) = self.now_playing() {
@@ -5246,6 +5407,7 @@ impl App {
                 if !matches!(self.page(), Page::Queue) && !self.show_queue_panel {
                     self.show_queue_panel = true;
                     self.show_lyrics_panel = false;
+                    self.close_notes_panel();
                 }
                 self.refresh_queue(true);
             }
@@ -5635,6 +5797,7 @@ impl App {
                 self.show_queue_panel = !self.show_queue_panel;
                 if self.show_queue_panel {
                     self.show_lyrics_panel = false;
+                    self.close_notes_panel();
                     self.refresh_queue(true);
                 }
             }
@@ -5642,9 +5805,35 @@ impl App {
                 self.show_lyrics_panel = !self.show_lyrics_panel;
                 if self.show_lyrics_panel {
                     self.show_queue_panel = false;
+                    self.close_notes_panel();
                     self.lyrics_following = true;
                     self.request_lyrics();
                 }
+            }
+            Action::ToggleNotesPanel => {
+                if self.show_notes_panel {
+                    self.close_notes_panel();
+                } else {
+                    self.actions.push(Action::ShowNotesPanel);
+                }
+            }
+            Action::ShowNotesPanel => {
+                self.show_notes_panel = true;
+                self.show_queue_panel = false;
+                self.show_lyrics_panel = false;
+                self.follow_note();
+            }
+            Action::NoteEdited => {
+                self.note_buffer_dirty = true;
+                self.last_note_edit = Some(Instant::now());
+            }
+            Action::DeleteNote(uri) => {
+                self.notes.remove(&uri);
+                if self.note_uri.as_deref() == Some(uri.as_str()) {
+                    self.note_buffer.clear();
+                    self.note_buffer_dirty = false;
+                }
+                self.save_notes();
             }
             Action::ToggleDevicesPopup => {
                 self.show_devices = !self.show_devices;
@@ -6271,6 +6460,7 @@ impl App {
     pub fn save_state(&mut self) {
         self.save_settings();
         self.save_session();
+        self.flush_notes();
     }
 
     /// Write the restorable session: page, recents, resume point, sorts.
@@ -8005,6 +8195,93 @@ mod tests {
         );
         app.local_ready = true;
         app
+    }
+
+    /// Puts a song in front of the editor, the way a cold start does.
+    fn now_showing(app: &mut App, id: &str) {
+        let uri = format!("spotify:track:{id}");
+        app.track_cache.insert(
+            id.to_string(),
+            Track {
+                id: Some(id.to_string()),
+                uri: uri.clone(),
+                name: format!("Song {id}"),
+                duration_ms: 200_000,
+                ..Default::default()
+            },
+        );
+        app.resume_track = Some(uri);
+    }
+
+    /// Moving to the next song writes down what was said about the last
+    /// one and puts its own note in the editor.
+    #[test]
+    fn the_editor_follows_the_playing_song() {
+        let mut app = headless_app();
+        now_showing(&mut app, "one");
+        app.follow_note();
+        assert_eq!(app.note_uri.as_deref(), Some("spotify:track:one"));
+        assert!(app.note_buffer.is_empty());
+
+        app.note_buffer = "drop at 1:04".into();
+        app.note_buffer_dirty = true;
+        // The writer stopped a while ago.
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        now_showing(&mut app, "two");
+        app.follow_note();
+
+        assert_eq!(app.notes.text("spotify:track:one"), "drop at 1:04");
+        assert_eq!(app.note_uri.as_deref(), Some("spotify:track:two"));
+        assert!(app.note_buffer.is_empty(), "the next song starts blank");
+
+        // Coming back brings the note back with it.
+        now_showing(&mut app, "one");
+        app.follow_note();
+        assert_eq!(app.note_buffer, "drop at 1:04");
+    }
+
+    /// A song that runs out mid-sentence must not split the sentence
+    /// between two notes: the swap waits until the typing stops.
+    #[test]
+    fn typing_holds_the_editor_on_the_song_being_written_about() {
+        let mut app = headless_app();
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "still writing".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now());
+
+        now_showing(&mut app, "two");
+        app.follow_note();
+        assert_eq!(
+            app.note_uri.as_deref(),
+            Some("spotify:track:one"),
+            "the editor stays put while the sentence is being written"
+        );
+        assert_eq!(app.note_buffer, "still writing");
+
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.follow_note();
+        assert_eq!(app.note_uri.as_deref(), Some("spotify:track:two"));
+        assert_eq!(app.notes.text("spotify:track:one"), "still writing");
+    }
+
+    /// Signing out leaves the file alone and takes the notes out of memory.
+    #[test]
+    fn signing_out_forgets_the_notes_without_deleting_them() {
+        let mut app = headless_app();
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "mine".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.commit_note();
+        assert!(!app.notes.is_empty());
+
+        app.forget_notes();
+        assert!(app.notes.is_empty());
+        assert!(app.note_uri.is_none());
+        assert!(app.note_buffer.is_empty());
     }
 
     fn cached_playlist_row(uri: &str) -> crate::api::models::PlaylistItem {

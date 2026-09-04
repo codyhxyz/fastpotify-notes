@@ -729,6 +729,14 @@ pub enum Action {
     ToggleSidebar,
     ToggleQueuePanel,
     ToggleLyricsPanel,
+    ToggleNotesPanel,
+    /// Open the notes panel whether or not it is already open.
+    ShowNotesPanel,
+    /// The note editor's text changed. The panel edits the buffer itself,
+    /// because egui's editor needs the string; this is the bookkeeping.
+    NoteEdited,
+    /// Forget the note written for this URI.
+    DeleteNote(String),
     ToggleDevicesPopup,
     SettingsChanged,
     RestartEngine,
