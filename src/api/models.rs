@@ -714,6 +714,14 @@ pub struct TopTracks {
     pub tracks: Vec<Track>,
 }
 
+/// The answer to `GET /v1/tracks`. One entry per id asked for, `None`
+/// where Spotify no longer knows the id.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct SeveralTracks {
+    #[serde(default, deserialize_with = "null_default")]
+    pub tracks: Vec<Option<Track>>,
+}
+
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 pub struct RelatedArtists {
     #[serde(default, deserialize_with = "skip_nulls")]

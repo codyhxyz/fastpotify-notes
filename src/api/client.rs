@@ -22,6 +22,13 @@ const BASE_URL: &str = "https://api.spotify.com/v1";
 const MAX_IN_FLIGHT: usize = 6;
 const RATE_LIMIT_RETRIES: u32 = 3;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How many song ids `GET /v1/tracks` takes at once.
+pub const TRACKS_PER_REQUEST: usize = 50;
+
+/// The ids split into the batches `GET /v1/tracks` takes.
+pub fn track_batches(ids: &[String]) -> Vec<&[String]> {
+    ids.chunks(TRACKS_PER_REQUEST).collect()
+}
 
 #[derive(Clone, Debug, Error)]
 pub enum ApiError {
@@ -1015,6 +1022,24 @@ impl ApiClient {
         self.get(&format!("/tracks/{id}"), &[]).await
     }
 
+    /// Several songs at once, at most [`TRACKS_PER_REQUEST`] of them.
+    ///
+    /// The answer keeps the shape of the question: one entry per id asked
+    /// for, and `None` where Spotify no longer knows the id. Losing that
+    /// would leave the caller unable to tell which song went missing.
+    pub async fn tracks(&self, ids: &[String]) -> Result<Vec<Option<Track>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let asked: Vec<&str> = ids
+            .iter()
+            .take(TRACKS_PER_REQUEST)
+            .map(String::as_str)
+            .collect();
+        let several: SeveralTracks = self.get("/tracks", &[("ids", asked.join(","))]).await?;
+        Ok(several.tracks)
+    }
+
     pub async fn episode(&self, id: &str) -> Result<Episode> {
         self.get(&format!("/episodes/{id}"), &[]).await
     }
@@ -1053,6 +1078,46 @@ mod tests {
             tracks.body(),
             json!({ "uris": ["spotify:track:a"], "offset": { "position": 0 } })
         );
+    }
+
+    #[test]
+    fn ids_are_asked_for_fifty_at_a_time() {
+        let ids: Vec<String> = (0..120).map(|n| format!("id{n:03}")).collect();
+        let batches = track_batches(&ids);
+        assert_eq!(batches.len(), 3, "120 ids is three requests, not one");
+        assert_eq!(batches[0].len(), TRACKS_PER_REQUEST);
+        assert_eq!(batches[1].len(), TRACKS_PER_REQUEST);
+        assert_eq!(batches[2].len(), 20);
+        assert_eq!(batches[0][0], "id000");
+        assert_eq!(batches[2][19], "id119");
+        let flat: Vec<&String> = batches.iter().flat_map(|batch| batch.iter()).collect();
+        assert_eq!(flat.len(), ids.len(), "every id is asked about once");
+
+        let exact: Vec<String> = (0..50).map(|n| format!("id{n}")).collect();
+        assert_eq!(track_batches(&exact).len(), 1, "fifty is still one request");
+        assert!(
+            track_batches(&[]).is_empty(),
+            "nothing to ask is no request"
+        );
+    }
+
+    /// Spotify answers with a null where it no longer knows an id, and the
+    /// answer still lines up with the ids that were asked for.
+    #[test]
+    fn a_song_spotify_no_longer_knows_stays_a_hole_in_the_answer() {
+        let several: SeveralTracks = serde_json::from_str(
+            r#"{"tracks": [{"id": "a", "name": "First"}, null, {"id": "c", "name": "Third"}]}"#,
+        )
+        .expect("the answer reads");
+        assert_eq!(several.tracks.len(), 3, "the hole is kept, not closed");
+        assert!(several.tracks[1].is_none());
+        let found: Vec<String> = several
+            .tracks
+            .into_iter()
+            .flatten()
+            .map(|track| track.name)
+            .collect();
+        assert_eq!(found, vec!["First".to_string(), "Third".to_string()]);
     }
 
     #[test]

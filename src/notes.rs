@@ -241,6 +241,22 @@ impl Notes {
         true
     }
 
+    /// Fills in what a note knows about its song, for a note that knows
+    /// nothing about it. A note that already has a title keeps everything
+    /// it has: the answer is about the same song, but that note was never
+    /// waiting on it. Answers whether the note took it.
+    pub fn fill_track(&mut self, uri: &str, track: TrackInfo) -> bool {
+        let Some(note) = self.notes.get_mut(uri) else {
+            return false;
+        };
+        if !note.track.title.is_empty() || track.title.is_empty() {
+            return false;
+        }
+        note.track = track;
+        self.dirty = true;
+        true
+    }
+
     /// Whether anything written here is still waiting for the server.
     pub fn has_pending(&self) -> bool {
         self.notes.values().any(|note| note.pending)
@@ -498,6 +514,55 @@ mod tests {
 
     fn now() -> jiff::Timestamp {
         "2026-09-03T18:22:10Z".parse().unwrap()
+    }
+
+    /// A note that arrived with nothing about its song takes what Spotify
+    /// says. A note that already knows its song is left alone.
+    #[test]
+    fn only_a_note_with_no_song_takes_one() {
+        let mut notes = Notes::default();
+        notes.set("spotify:track:known", "already knows", info(), now());
+        notes.set(
+            "spotify:track:blank",
+            "knows nothing",
+            TrackInfo::default(),
+            now(),
+        );
+        let dir =
+            std::env::temp_dir().join(format!("fastpotify-notes-fill-{}", std::process::id()));
+        let path = dir.join("notes.json");
+        notes.save(&path);
+        assert!(!notes.is_dirty(), "everything is on disk to start with");
+
+        let looked_up = TrackInfo {
+            title: "Caramelldansen".into(),
+            artists: vec!["Caramella Girls".into()],
+            album: "Speedy Mixes".into(),
+            art_url: Some("https://i.scdn.co/image/xyz".into()),
+            duration_ms: 175_000,
+        };
+        assert!(notes.fill_track("spotify:track:blank", looked_up.clone()));
+        assert_eq!(
+            notes.get("spotify:track:blank").unwrap().track,
+            looked_up,
+            "the song it had no idea about is now on the note"
+        );
+        assert!(notes.is_dirty(), "the file has to be written again");
+
+        assert!(
+            !notes.fill_track("spotify:track:known", looked_up.clone()),
+            "a note that already has a title keeps what it has"
+        );
+        assert_eq!(notes.get("spotify:track:known").unwrap().track, info());
+        assert!(
+            !notes.fill_track("spotify:track:missing", looked_up),
+            "there is no note to fill in"
+        );
+        assert!(
+            !notes.fill_track("spotify:track:blank", TrackInfo::default()),
+            "an answer with no title fills nothing in"
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// What was written comes back, with the track it belongs to.

@@ -201,7 +201,7 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             continue;
         }
         shown += 1;
-        if let Some(pick) = row(ui, &palette, uri, note, now) {
+        if let Some(pick) = row(ui, &palette, note, now) {
             picked = Some((uri.to_string(), pick));
         }
     }
@@ -241,10 +241,19 @@ fn matches(note: &crate::notes::Note, query: &str) -> bool {
         || note.track.artists.iter().any(|artist| holds(artist))
 }
 
+/// What the row calls the song. A note whose song Spotify would not
+/// name has nothing to show, and a `spotify:track:` URI is not a name.
+fn row_title(note: &crate::notes::Note) -> &str {
+    if note.track.title.is_empty() {
+        "Unknown song"
+    } else {
+        note.track.title.as_str()
+    }
+}
+
 fn row(
     ui: &mut egui::Ui,
     palette: &theme::Palette,
-    uri: &str,
     note: &crate::notes::Note,
     now: jiff::Timestamp,
 ) -> Option<Picked> {
@@ -284,12 +293,12 @@ fn row(
             .layout(Layout::top_down(Align::Min)),
     );
     column.spacing_mut().item_spacing.y = 1.0;
-    let title = if note.track.title.is_empty() {
-        uri
-    } else {
-        note.track.title.as_str()
-    };
-    theme::text(&mut column, title, theme::medium(14.0), palette.text);
+    theme::text(
+        &mut column,
+        row_title(note),
+        theme::medium(14.0),
+        palette.text,
+    );
     if !note.track.artists.is_empty() {
         theme::text(
             &mut column,
@@ -331,4 +340,26 @@ fn row(
             }
         });
     picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A note whose song could not be looked up is shown as unknown, and
+    /// never as the URI it is filed under.
+    #[test]
+    fn a_note_with_no_song_is_shown_as_unknown() {
+        let mut note = crate::notes::Note {
+            text: "worth keeping".into(),
+            ..Default::default()
+        };
+        assert_eq!(row_title(&note), "Unknown song");
+        assert!(
+            !row_title(&note).contains("spotify:track:"),
+            "the URI is not something to read"
+        );
+        note.track.title = "Caramelldansen".into();
+        assert_eq!(row_title(&note), "Caramelldansen");
+    }
 }

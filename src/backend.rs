@@ -506,6 +506,9 @@ pub enum Command {
     },
     /// Write one song's note to My Song Notes. An empty note deletes it.
     NotesPut(Box<crate::notes_sync::PutRequest>),
+    /// Look up the songs behind these track ids, for notes that arrived
+    /// with no name and no cover, and tell My Song Notes what they are.
+    NotesHydrate(Vec<String>),
 }
 
 pub struct LyricsRequest {
@@ -577,6 +580,11 @@ pub enum Event {
         sent: String,
         result: Result<crate::notes_sync::PutOutcome, crate::notes_sync::SyncError>,
     },
+    /// The songs looked up for notes that had none of their details, only
+    /// the ones Spotify still knows.
+    NotesHydrated(Vec<crate::api::models::Track>),
+    /// How many notes My Song Notes filled in from those songs.
+    NotesMetaSent(usize),
 }
 
 /// The state of playback on this computer, independent of Web API sign-in.
@@ -951,6 +959,7 @@ impl Worker {
                 Command::NotesList => self.notes_list(),
                 Command::NotesGet { track_id } => self.notes_get(track_id),
                 Command::NotesPut(request) => self.notes_put(*request),
+                Command::NotesHydrate(ids) => self.notes_hydrate(ids),
                 Command::ConfigurePersonalWebApp(client_id) => {
                     self.configure_personal_web_app(client_id)
                 }
@@ -1662,6 +1671,55 @@ impl Worker {
                 sent: request.html,
                 result,
             });
+            waker.wake();
+        });
+    }
+
+    /// Looks up the songs whose notes carry nothing to draw a row with,
+    /// then tells My Song Notes what they are so no other device has to
+    /// ask again.
+    ///
+    /// One task does both. The lookups are sequential because they run
+    /// against the same rate limiter as everything else, and filling in
+    /// old notes must never be what makes the playing song wait.
+    fn notes_hydrate(&self, ids: Vec<String>) {
+        let Some(client) = self.notes_client() else {
+            return;
+        };
+        let http = self.http.clone();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let asked = ids.len();
+            let mut found: Vec<crate::api::models::Track> = Vec::new();
+            for batch in crate::api::client::track_batches(&ids) {
+                match client.tracks(batch).await {
+                    // Spotify leaves a hole where it no longer knows an id.
+                    // Those notes keep no name and are shown as unknown.
+                    Ok(answer) => found.extend(answer.into_iter().flatten()),
+                    Err(error) => {
+                        log::warn!("notes: could not look the songs up: {error}");
+                        break;
+                    }
+                }
+            }
+            log::info!("notes: hydrated {} of {asked} from Spotify", found.len());
+            let entries: Vec<crate::notes_sync::MetaPatch> = found
+                .iter()
+                .filter_map(crate::notes_sync::MetaPatch::for_track)
+                .collect();
+            let _ = events.send(Event::NotesHydrated(found));
+            waker.wake();
+            if entries.is_empty() {
+                return;
+            }
+            match crate::notes_sync::patch_meta(&http, &client, &entries).await {
+                Ok(updated) => {
+                    log::info!("notes: sent metadata for {updated}");
+                    let _ = events.send(Event::NotesMetaSent(updated));
+                }
+                Err(error) => log::warn!("notes: could not send the songs' details: {error}"),
+            }
             waker.wake();
         });
     }

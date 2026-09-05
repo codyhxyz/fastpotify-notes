@@ -74,7 +74,7 @@ Notes are kept in [My Song Notes](https://songnotes.codyh.xyz) at
 songnotes.codyh.xyz, so the same notes are in Fastpotify, in the browser,
 and on a phone. Fastpotify is a client of it and holds only a copy.
 
-Three requests go there, each carrying your Spotify Web API access token as
+Four requests go there, each carrying your Spotify Web API access token as
 a bearer token. The server asks Spotify who that token belongs to and answers
 with that account's notes; nothing else identifies you, and no separate
 sign-in is needed.
@@ -84,6 +84,15 @@ sign-in is needed.
 | `GET /api/notes/list` | Signing in, opening the notes panel, opening the notes page | The token |
 | `GET /api/notes?track_id=` | Every song change while the panel is open | The token and the track id |
 | `PUT /api/notes` | A second after you stop typing, and when the panel closes, the song changes, or the app quits | The token, the note as HTML, the version last seen, and the song's name, artists, artist and album and track links, and cover URL |
+| `PATCH /api/notes` | Right after a list that contained notes with no song details, up to 200 songs at a time | The token and the songs' names, artists, artist and album and track links, and cover URLs, and never a note |
+
+Some notes were written before My Song Notes kept a song's name and cover,
+so a list can arrive with nothing to draw a row with: Fastpotify asks Spotify
+`GET /v1/tracks` about those songs, fifty ids at a time, and shows a song it
+no longer knows as Unknown song. Those details then go back to the server as
+a `PATCH /api/notes`, which carries the songs and nothing else, so the note
+and the time it was last written stay exactly as they were and every device
+lists them filled in from then on.
 
 An empty note is a deleted note, so a deletion is the same `PUT`. If the
 server holds a newer version of that note, it refuses the write, Fastpotify

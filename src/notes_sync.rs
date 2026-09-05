@@ -21,6 +21,8 @@ pub const BASE_URL: &str = "https://songnotes.codyh.xyz";
 const PAGE_SIZE: u32 = 200;
 /// A stop against a cursor that never ends.
 const MAX_PAGES: usize = 50;
+/// How many songs' details go in one `PATCH`. The server caps this at 200.
+const PATCH_CHUNK: usize = 200;
 
 /// Why a request did not answer.
 #[derive(Clone, Debug)]
@@ -113,6 +115,48 @@ pub struct Meta {
     pub album_url: Option<String>,
 }
 
+/// One song's details on their way to the server, with nothing about the
+/// note itself.
+#[derive(Clone, Debug, Default, PartialEq, Serialize)]
+pub struct MetaPatch {
+    pub track_id: String,
+    #[serde(flatten)]
+    pub meta: Meta,
+}
+
+impl MetaPatch {
+    /// What the server should be told about a song, from Spotify's answer.
+    /// `None` for a track with no id, which no note can be filed under.
+    pub fn for_track(track: &crate::api::models::Track) -> Option<Self> {
+        let track_id = track.id.clone().filter(|id| !id.is_empty())?;
+        let names: Vec<String> = track
+            .artists
+            .iter()
+            .map(|artist| artist.name.clone())
+            .collect();
+        let urls: Vec<String> = track
+            .artists
+            .iter()
+            .filter_map(|artist| artist.id.as_deref())
+            .map(|id| format!("https://open.spotify.com/artist/{id}"))
+            .collect();
+        let album = track.album.as_ref();
+        Some(Self {
+            meta: Meta {
+                name: (!track.name.is_empty()).then(|| track.name.clone()),
+                artists: (!names.is_empty()).then_some(names),
+                artist_urls: (!urls.is_empty()).then_some(urls),
+                image_url: track.image(u32::MAX).map(str::to_string),
+                track_url: Some(format!("https://open.spotify.com/track/{track_id}")),
+                album_url: album
+                    .filter(|album| !album.id.is_empty())
+                    .map(|album| format!("https://open.spotify.com/album/{}", album.id)),
+            },
+            track_id,
+        })
+    }
+}
+
 /// A note on its way to the server.
 #[derive(Clone, Debug)]
 pub struct PutRequest {
@@ -143,6 +187,17 @@ struct PutBody<'a> {
     expected_updated_at: Option<&'a str>,
     #[serde(flatten)]
     meta: &'a Meta,
+}
+
+#[derive(Serialize)]
+struct PatchBody<'a> {
+    notes: &'a [MetaPatch],
+}
+
+#[derive(Deserialize)]
+struct PatchAnswer {
+    #[serde(default)]
+    updated: usize,
 }
 
 #[derive(Deserialize)]
@@ -293,6 +348,40 @@ pub async fn put(
     })
 }
 
+/// Fills in what the server does not know about the songs its notes are
+/// for. Notes bulk imported before the web app kept a song's details have
+/// no name and no cover, and this is the only write that fixes that: it
+/// never carries a note, and the server leaves the note and the time it
+/// was written alone.
+///
+/// Answers how many notes the server actually had. Songs it has no note
+/// for are its business to skip, not ours to know about.
+pub async fn patch_meta(
+    http: &reqwest::Client,
+    client: &ApiClient,
+    entries: &[MetaPatch],
+) -> Result<usize> {
+    let url = format!("{BASE_URL}/api/notes");
+    let mut updated = 0;
+    for chunk in patch_batches(entries) {
+        let body = PatchBody { notes: chunk };
+        let answer: PatchAnswer = decode(
+            authorized(client, |token| {
+                http.patch(&url).bearer_auth(token).json(&body)
+            })
+            .await?,
+        )
+        .await?;
+        updated += answer.updated;
+    }
+    Ok(updated)
+}
+
+/// The songs split into the batches `PATCH /api/notes` takes.
+fn patch_batches(entries: &[MetaPatch]) -> Vec<&[MetaPatch]> {
+    entries.chunks(PATCH_CHUNK).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -376,6 +465,120 @@ mod tests {
         assert_eq!(ids, vec!["a", "b", "c"]);
         let texts: Vec<String> = rows.iter().map(Row::text).collect();
         assert_eq!(texts, vec!["one", "two", "three"]);
+    }
+
+    /// A backfill carries only the songs, never a note, and goes two
+    /// hundred at a time because that is all the server takes.
+    #[test]
+    fn a_backfill_carries_the_songs_two_hundred_at_a_time() {
+        let entries: Vec<MetaPatch> = (0..450)
+            .map(|n| MetaPatch {
+                track_id: format!("id{n:03}"),
+                meta: Meta {
+                    name: Some(format!("Song {n}")),
+                    ..Default::default()
+                },
+            })
+            .collect();
+        let batches = patch_batches(&entries);
+        assert_eq!(batches.len(), 3, "450 songs is three requests");
+        assert_eq!(batches[0].len(), PATCH_CHUNK);
+        assert_eq!(batches[1].len(), PATCH_CHUNK);
+        assert_eq!(batches[2].len(), 50);
+        assert_eq!(batches[0][0].track_id, "id000");
+        assert_eq!(batches[2][49].track_id, "id449");
+        assert!(
+            patch_batches(&[]).is_empty(),
+            "nothing to fill is no request"
+        );
+
+        let body = PatchBody {
+            notes: &entries[..2],
+        };
+        let json: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&body).unwrap()).unwrap();
+        assert_eq!(json["notes"].as_array().unwrap().len(), 2);
+        assert_eq!(json["notes"][0]["track_id"], "id000");
+        assert_eq!(json["notes"][0]["name"], "Song 0");
+        assert!(
+            json["notes"][0].get("note").is_none(),
+            "a backfill never carries the note"
+        );
+        assert!(
+            json["notes"][0].get("expected_updated_at").is_none(),
+            "a backfill never carries a version to write over"
+        );
+        assert!(
+            json["notes"][0].get("image_url").is_none(),
+            "what is unknown is not sent, so the server keeps what it has"
+        );
+    }
+
+    /// Spotify's answer becomes the details the server is missing.
+    #[test]
+    fn a_song_from_spotify_becomes_the_details_to_send() {
+        let track: crate::api::models::Track = serde_json::from_str(
+            r#"{
+              "id": "4uLU6hMCjMI75M1A2tKUQC",
+              "name": "Long Way Home",
+              "duration_ms": 214000,
+              "artists": [
+                {"id": "art1", "name": "Marconi Union"},
+                {"id": "art2", "name": "Guest"}
+              ],
+              "album": {
+                "id": "alb1",
+                "name": "Distance",
+                "images": [
+                  {"url": "https://i.scdn.co/image/small", "width": 64, "height": 64},
+                  {"url": "https://i.scdn.co/image/large", "width": 640, "height": 640}
+                ]
+              }
+            }"#,
+        )
+        .expect("the song reads");
+        let patch = MetaPatch::for_track(&track).expect("the song has an id");
+        assert_eq!(patch.track_id, "4uLU6hMCjMI75M1A2tKUQC");
+        assert_eq!(patch.meta.name.as_deref(), Some("Long Way Home"));
+        assert_eq!(
+            patch.meta.artists,
+            Some(vec!["Marconi Union".to_string(), "Guest".to_string()])
+        );
+        assert_eq!(
+            patch.meta.artist_urls,
+            Some(vec![
+                "https://open.spotify.com/artist/art1".to_string(),
+                "https://open.spotify.com/artist/art2".to_string(),
+            ])
+        );
+        assert_eq!(
+            patch.meta.image_url.as_deref(),
+            Some("https://i.scdn.co/image/large"),
+            "the biggest cover, so the web app has one worth showing"
+        );
+        assert_eq!(
+            patch.meta.track_url.as_deref(),
+            Some("https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC")
+        );
+        assert_eq!(
+            patch.meta.album_url.as_deref(),
+            Some("https://open.spotify.com/album/alb1")
+        );
+
+        let nameless: crate::api::models::Track =
+            serde_json::from_str(r#"{"name": "No id"}"#).expect("reads");
+        assert!(
+            MetaPatch::for_track(&nameless).is_none(),
+            "a song with no id has no note to fill in"
+        );
+
+        let bare: crate::api::models::Track =
+            serde_json::from_str(r#"{"id": "trk", "name": "Bare"}"#).expect("reads");
+        let patch = MetaPatch::for_track(&bare).expect("the song has an id");
+        assert!(patch.meta.artists.is_none());
+        assert!(patch.meta.artist_urls.is_none());
+        assert!(patch.meta.image_url.is_none());
+        assert!(patch.meta.album_url.is_none());
     }
 
     /// The body carries the note, the version it was written over, and the

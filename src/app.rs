@@ -330,6 +330,9 @@ pub struct App {
     notes_offline: bool,
     /// songnotes refused the Spotify sign-in; said once, not every write.
     notes_signin_warned: bool,
+    /// Track ids already looked up for notes that arrived with no name,
+    /// so a second list does not ask Spotify the same question again.
+    notes_hydrate_asked: std::collections::HashSet<String>,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -627,6 +630,7 @@ impl App {
             notes_retry_at: None,
             notes_offline: false,
             notes_signin_warned: false,
+            notes_hydrate_asked: std::collections::HashSet::new(),
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
@@ -1396,6 +1400,11 @@ impl App {
                     sent,
                     result,
                 } => self.handle_notes_put(track_id, sent, result),
+                Event::NotesHydrated(tracks) => self.apply_hydrated_notes(tracks),
+                // The details reached songnotes, so every device lists
+                // them filled in from now on. The rows here already show
+                // them; the count is for the log.
+                Event::NotesMetaSent(_) => {}
                 Event::UpdateAvailable { version, url } => {
                     let notice = crate::updates::Release { version, url };
                     if self.update.as_ref() != Some(&notice) {
@@ -2117,10 +2126,67 @@ impl App {
             .collect();
         self.notes.apply_server_list(incoming);
         self.rehydrate_note_buffer();
+        self.hydrate_missing_notes();
         self.save_notes();
         // The list answering proves the network is back, so anything still
         // waiting can go now instead of sitting out the backoff.
         self.push_pending_notes();
+    }
+
+    /// Asks Spotify about the songs whose notes arrived with nothing to
+    /// draw a row with.
+    ///
+    /// The notes imported into My Song Notes before it kept a song's
+    /// details have no name and no cover, so a row would be a bare URI.
+    /// One question covers all of them, and the answers go back to the
+    /// server, so the next list already has them and this asks for less
+    /// every time. A song asked about once is not asked about again: an
+    /// id Spotify no longer knows will never start answering.
+    fn hydrate_missing_notes(&mut self) {
+        if self.offline {
+            return;
+        }
+        let ids: Vec<String> = notes_missing_a_song(&self.notes)
+            .into_iter()
+            .filter(|id| self.notes_hydrate_asked.insert(id.clone()))
+            .collect();
+        if ids.is_empty() {
+            return;
+        }
+        self.backend.send(Command::NotesHydrate(ids));
+    }
+
+    /// Puts what Spotify said onto the notes that knew nothing about their
+    /// song. A note that has since learned its song keeps what it has.
+    fn apply_hydrated_notes(&mut self, tracks: Vec<crate::api::models::Track>) {
+        let mut filled = 0;
+        for track in tracks {
+            let Some(id) = track.id.as_deref().filter(|id| !id.is_empty()) else {
+                continue;
+            };
+            let uri = format!("spotify:track:{id}");
+            let info = crate::notes::TrackInfo {
+                title: track.name.clone(),
+                artists: track
+                    .artists
+                    .iter()
+                    .map(|artist| artist.name.clone())
+                    .collect(),
+                album: track
+                    .album
+                    .as_ref()
+                    .map(|album| album.name.clone())
+                    .unwrap_or_default(),
+                art_url: track.image(u32::MAX).map(str::to_string),
+                duration_ms: track.duration_ms,
+            };
+            if self.notes.fill_track(&uri, info) {
+                filled += 1;
+            }
+        }
+        if filled > 0 {
+            self.save_notes();
+        }
     }
 
     /// Puts songnotes' copy of one note in place. An edit under way is left
@@ -7044,6 +7110,26 @@ fn cap_uris(uris: Vec<String>, index: u32) -> (Vec<String>, u32) {
     (uris[start..end].to_vec(), 0)
 }
 
+/// The songs a note is filed under but knows nothing about, newest note
+/// first. A note with a title has everything a row needs.
+fn notes_missing_a_song(notes: &crate::notes::Notes) -> Vec<String> {
+    notes
+        .newest_first()
+        .into_iter()
+        .filter(|(_, note)| note.track.title.is_empty())
+        .filter_map(|(uri, _)| crate::notes::track_id(uri))
+        .filter(|id| is_spotify_id(id))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Whether `id` is a Spotify id: twenty two letters and digits. A note
+/// filed under anything else came from somewhere Spotify cannot be asked
+/// about, so asking would only spend a request to be told no.
+fn is_spotify_id(id: &str) -> bool {
+    id.len() == 22 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8785,6 +8871,138 @@ mod tests {
         assert!(
             app.notes.get("spotify:track:gone").is_none(),
             "a note the server no longer has was deleted elsewhere"
+        );
+    }
+
+    /// Notes imported before My Song Notes kept a song's details arrive
+    /// with nothing to draw a row with, and those are the ones Spotify is
+    /// asked about. Once each: an id Spotify has forgotten never starts
+    /// answering.
+    #[test]
+    fn only_the_notes_with_no_song_are_looked_up() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.notes_loaded_for = Some("me".into());
+        let known = crate::notes::TrackInfo {
+            title: "Long Way Home".into(),
+            ..Default::default()
+        };
+        let at = jiff::Timestamp::now();
+        app.notes.set(
+            "spotify:track:5xke7hhgx8VRhiZzNpiMqj",
+            "no idea what this is",
+            crate::notes::TrackInfo::default(),
+            at,
+        );
+        app.notes.set(
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+            "this one is known",
+            known,
+            at,
+        );
+        app.notes.set(
+            "spotify:track:short",
+            "not a Spotify id",
+            crate::notes::TrackInfo::default(),
+            at,
+        );
+
+        assert_eq!(
+            notes_missing_a_song(&app.notes),
+            vec!["5xke7hhgx8VRhiZzNpiMqj".to_string()],
+            "a known song is left alone and a strange id is not asked about"
+        );
+
+        app.hydrate_missing_notes();
+        assert!(app.notes_hydrate_asked.contains("5xke7hhgx8VRhiZzNpiMqj"));
+        assert_eq!(app.notes_hydrate_asked.len(), 1);
+        app.hydrate_missing_notes();
+        assert_eq!(
+            app.notes_hydrate_asked.len(),
+            1,
+            "a second list does not ask the same question again"
+        );
+    }
+
+    /// What Spotify said lands on the notes that knew nothing, and nowhere
+    /// else.
+    #[test]
+    fn a_looked_up_song_fills_only_the_note_that_had_none() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.offline = true;
+        let at = jiff::Timestamp::now();
+        app.notes.set(
+            "spotify:track:5xke7hhgx8VRhiZzNpiMqj",
+            "no idea what this is",
+            crate::notes::TrackInfo::default(),
+            at,
+        );
+        app.notes.set(
+            "spotify:track:4uLU6hMCjMI75M1A2tKUQC",
+            "this one is known",
+            crate::notes::TrackInfo {
+                title: "Long Way Home".into(),
+                ..Default::default()
+            },
+            at,
+        );
+
+        let tracks: Vec<crate::api::models::Track> = serde_json::from_str(
+            r#"[
+              {"id": "5xke7hhgx8VRhiZzNpiMqj", "name": "Caramelldansen",
+               "duration_ms": 175000,
+               "artists": [{"id": "art1", "name": "Caramella Girls"}],
+               "album": {"id": "alb1", "name": "Speedy Mixes",
+                         "images": [{"url": "https://i.scdn.co/image/small", "width": 64},
+                                    {"url": "https://i.scdn.co/image/large", "width": 640}]}},
+              {"id": "4uLU6hMCjMI75M1A2tKUQC", "name": "Something Else",
+               "artists": [{"id": "art2", "name": "Somebody"}]}
+            ]"#,
+        )
+        .unwrap();
+        app.apply_hydrated_notes(tracks);
+
+        let filled = app
+            .notes
+            .get("spotify:track:5xke7hhgx8VRhiZzNpiMqj")
+            .unwrap();
+        assert_eq!(filled.track.title, "Caramelldansen");
+        assert_eq!(filled.track.artists, vec!["Caramella Girls".to_string()]);
+        assert_eq!(filled.track.album, "Speedy Mixes");
+        assert_eq!(
+            filled.track.art_url.as_deref(),
+            Some("https://i.scdn.co/image/large"),
+            "the biggest cover the album has"
+        );
+        assert_eq!(filled.track.duration_ms, 175_000);
+        assert_eq!(filled.text, "no idea what this is", "the note is untouched");
+
+        let untouched = app
+            .notes
+            .get("spotify:track:4uLU6hMCjMI75M1A2tKUQC")
+            .unwrap();
+        assert_eq!(
+            untouched.track.title, "Long Way Home",
+            "a note that already knows its song keeps what it has"
+        );
+    }
+
+    #[test]
+    fn a_spotify_id_is_twenty_two_letters_and_digits() {
+        assert!(is_spotify_id("5xke7hhgx8VRhiZzNpiMqj"));
+        assert!(!is_spotify_id("short"));
+        assert!(
+            !is_spotify_id("5xke7hhgx8VRhiZzNpiMq"),
+            "twenty one is not one"
+        );
+        assert!(
+            !is_spotify_id("5xke7hhgx8VRhiZzNpiMqjj"),
+            "nor is twenty three"
+        );
+        assert!(
+            !is_spotify_id("5xke7hhgx8VRhiZzNpiM-j"),
+            "nor one with a dash"
         );
     }
 
