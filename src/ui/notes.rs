@@ -73,6 +73,16 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
         );
         return;
     };
+    if crate::notes::track_id(&now.uri).is_none() {
+        widgets::empty_state(
+            ui,
+            &palette,
+            Icon::SquarePen,
+            "Notes are for songs",
+            "Play one to write about it.",
+        );
+        return;
+    }
     ui.horizontal(|ui| {
         ui.add_space(4.0);
         ui.vertical(|ui| {
@@ -82,6 +92,12 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
             }
         });
     });
+    if let Some(hint) = app.notes_sync_hint() {
+        ui.horizontal(|ui| {
+            ui.add_space(4.0);
+            theme::text(ui, hint, theme::regular(11.5), palette.secondary);
+        });
+    }
     ui.add_space(8.0);
 
     // The times written in the note, each a way back to that moment.
@@ -160,6 +176,9 @@ pub fn page(app: &mut App, ui: &mut egui::Ui) {
             );
         });
     });
+    if let Some(hint) = app.notes_sync_hint() {
+        theme::text(ui, hint, theme::regular(12.0), palette.secondary);
+    }
     ui.add_space(12.0);
 
     if app.notes.is_empty() {

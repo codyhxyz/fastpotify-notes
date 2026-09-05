@@ -91,6 +91,12 @@ impl TokenProvider {
         let Self::Web(tokens) = self;
         let _ = tokens.access_token(true).await;
     }
+
+    async fn token(&self, force: bool) -> Result<String> {
+        match self {
+            Self::Web(tokens) => tokens.access_token(force).await,
+        }
+    }
 }
 
 /// The Web API grant, refreshed and persisted as it ages.
@@ -290,6 +296,17 @@ impl ApiClient {
             source,
             activity,
         }
+    }
+
+    /// The Spotify access token this session holds, refreshed when it is
+    /// close to expiry, or minted fresh when `force` asks after a 401.
+    ///
+    /// Only [`crate::notes_sync`] needs the token itself: My Song Notes
+    /// takes it as a bearer token to work out whose notes these are.
+    /// Everything else goes through the typed calls here, which put the
+    /// token on the request themselves.
+    pub(crate) async fn notes_access_token(&self, force: bool) -> Result<String> {
+        self.provider()?.token(force).await
     }
 
     pub fn set_token_provider(&self, provider: Option<TokenProvider>) {

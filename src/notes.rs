@@ -1,10 +1,15 @@
 //! A note for every song.
 //!
-//! One JSON file per account in the state directory, keyed by Spotify URI
-//! because that is what Fastpotify identifies everything by and a track id
-//! is optional. Each note carries the track's name, artists, album, cover,
-//! and length so the notes page draws from disk without asking Spotify
-//! about songs it may no longer be able to reach.
+//! The notes themselves live in My Song Notes, so they are the same notes
+//! on every device. See [`crate::notes_sync`]. The JSON file per account in
+//! the state directory is a cache and an outbox: it shows the notes before
+//! the first answer comes back, and it holds an edit made with no network
+//! until the server has taken it.
+//!
+//! Keyed by Spotify URI because that is what Fastpotify identifies
+//! everything by. Each note carries the track's name, artists, album,
+//! cover, and length so the notes page draws from disk without asking
+//! Spotify about songs it may no longer be able to reach.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -36,8 +41,14 @@ pub struct Note {
     #[serde(default)]
     pub text: String,
     /// RFC 3339, the same shape as every other time Fastpotify writes down.
+    /// This is the server's time for the note, not this computer's, because
+    /// it is what the next write offers back as the version it saw.
     #[serde(default)]
     pub updated_at: String,
+    /// Written here and not yet taken by the server. An unsent note is
+    /// never replaced by what the server has.
+    #[serde(default)]
+    pub pending: bool,
     #[serde(flatten)]
     pub track: TrackInfo,
 }
@@ -90,11 +101,21 @@ impl Notes {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.notes.is_empty()
+        self.written().next().is_none()
     }
 
     pub fn len(&self) -> usize {
-        self.notes.len()
+        self.written().count()
+    }
+
+    /// The notes with words in them. A note emptied here is kept as an
+    /// empty one until the server has been told, and that is not a note
+    /// anybody wants to look at.
+    fn written(&self) -> impl Iterator<Item = (&str, &Note)> {
+        self.notes
+            .iter()
+            .filter(|(_, note)| !note.text.is_empty())
+            .map(|(uri, note)| (uri.as_str(), note))
     }
 
     pub fn is_dirty(&self) -> bool {
@@ -114,17 +135,30 @@ impl Notes {
             .unwrap_or_default()
     }
 
-    /// Writes `text` down for `uri`. An empty note is no note: it is
-    /// removed, the way clearing the field in the web app removes it.
+    /// Writes `text` down for `uri`, to be sent on. An empty note is no
+    /// note: it is removed, the way clearing the field in the web app
+    /// removes it.
+    ///
+    /// `now` is only the time a note nobody has seen yet is stamped with,
+    /// so it sorts sensibly before the server answers. A note the server
+    /// already knows keeps the time the server gave it, which is the
+    /// version the next write offers back.
     pub fn set(&mut self, uri: &str, text: &str, track: TrackInfo, now: jiff::Timestamp) {
         let text = text.trim();
         if text.is_empty() {
             self.remove(uri);
             return;
         }
+        let updated_at = self
+            .notes
+            .get(uri)
+            .map(|note| note.updated_at.clone())
+            .filter(|at| !at.is_empty())
+            .unwrap_or_else(|| now.to_string());
         let note = Note {
             text: text.to_string(),
-            updated_at: now.to_string(),
+            updated_at,
+            pending: true,
             track,
         };
         if self.notes.get(uri) == Some(&note) {
@@ -134,20 +168,25 @@ impl Notes {
         self.dirty = true;
     }
 
+    /// Forgets the note for `uri`. A note that has been to the server is
+    /// kept as an empty one until the deletion has been sent, because that
+    /// is the only record that it has to be.
     pub fn remove(&mut self, uri: &str) {
-        if self.notes.remove(uri).is_some() {
-            self.dirty = true;
+        let Some(note) = self.notes.get_mut(uri) else {
+            return;
+        };
+        if note.text.is_empty() {
+            return;
         }
+        note.text.clear();
+        note.pending = true;
+        self.dirty = true;
     }
 
     /// Every note, newest first. Notes with the same time keep a stable
     /// order by URI so the page does not shuffle between frames.
     pub fn newest_first(&self) -> Vec<(&str, &Note)> {
-        let mut rows: Vec<(&str, &Note)> = self
-            .notes
-            .iter()
-            .map(|(uri, note)| (uri.as_str(), note))
-            .collect();
+        let mut rows: Vec<(&str, &Note)> = self.written().collect();
         rows.sort_by(|a, b| {
             b.1.updated_at
                 .cmp(&a.1.updated_at)
@@ -201,6 +240,106 @@ impl Notes {
         self.dirty = true;
         true
     }
+
+    /// Whether anything written here is still waiting for the server.
+    pub fn has_pending(&self) -> bool {
+        self.notes.values().any(|note| note.pending)
+    }
+
+    /// Every note waiting for the server, so it can be offered again.
+    pub fn pending(&self) -> Vec<(String, Note)> {
+        let mut rows: Vec<(String, Note)> = self
+            .notes
+            .iter()
+            .filter(|(_, note)| note.pending)
+            .map(|(uri, note)| (uri.clone(), note.clone()))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
+    /// The server took this note. An emptied note is now gone for good;
+    /// anything else keeps the time the server gave it back.
+    pub fn mark_sent(&mut self, uri: &str, updated_at: &str) {
+        let Some(note) = self.notes.get_mut(uri) else {
+            return;
+        };
+        if note.text.is_empty() {
+            self.notes.remove(uri);
+            self.dirty = true;
+            return;
+        }
+        note.pending = false;
+        if !updated_at.is_empty() {
+            note.updated_at = updated_at.to_string();
+        }
+        self.dirty = true;
+    }
+
+    /// Puts the server's copy in place whatever is held here. `None` means
+    /// the server has no note for this song, so neither do we.
+    pub fn take_server(&mut self, uri: &str, incoming: Option<Note>) {
+        match incoming {
+            Some(mut note) => {
+                note.pending = false;
+                // The server has no album name and no track length, so a
+                // note that has played here keeps what it already knew.
+                if let Some(held) = self.notes.get(uri) {
+                    if note.track.album.is_empty() {
+                        note.track.album = held.track.album.clone();
+                    }
+                    if note.track.duration_ms == 0 {
+                        note.track.duration_ms = held.track.duration_ms;
+                    }
+                }
+                self.notes.insert(uri.to_string(), note);
+            }
+            None => {
+                self.notes.remove(uri);
+            }
+        }
+        self.dirty = true;
+    }
+
+    /// The server's copy, unless what is held here has not been sent yet.
+    /// Answers whether the server's copy is now the one on file.
+    pub fn apply_server(&mut self, uri: &str, incoming: Option<Note>) -> bool {
+        if self.notes.get(uri).is_some_and(|note| note.pending) {
+            return false;
+        }
+        self.take_server(uri, incoming);
+        true
+    }
+
+    /// Replaces everything with the server's list, keeping notes written
+    /// here that have not been sent. A note the server does not have and
+    /// this computer has already sent was deleted somewhere else, so it
+    /// goes.
+    pub fn apply_server_list(&mut self, incoming: Vec<(String, Note)>) {
+        let mut seen: std::collections::HashSet<String> =
+            std::collections::HashSet::with_capacity(incoming.len());
+        for (uri, note) in incoming {
+            seen.insert(uri.clone());
+            self.apply_server(&uri, Some(note));
+        }
+        let dropped: Vec<String> = self
+            .notes
+            .iter()
+            .filter(|(uri, note)| !note.pending && !seen.contains(uri.as_str()))
+            .map(|(uri, _)| uri.clone())
+            .collect();
+        for uri in dropped {
+            self.notes.remove(&uri);
+            self.dirty = true;
+        }
+    }
+}
+
+/// The bare track id in a `spotify:track:<id>` URI. Notes are for songs:
+/// an episode, an ad, or a local file has nowhere to keep one.
+pub fn track_id(uri: &str) -> Option<&str> {
+    let id = uri.strip_prefix("spotify:track:")?;
+    (!id.is_empty() && !id.contains(':')).then_some(id)
 }
 
 /// Whether `candidate` was written after `held`. Compared as instants
@@ -321,78 +460,26 @@ pub fn strip_html(html: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
-/// One row of the export My Song Notes writes from its Settings page.
+/// Turns the note held here into the HTML the web app stores.
 ///
-/// The export carries `track_name`, `note_html` and `note_text`; the
-/// aliases accept a raw dump of the app's own list endpoint too, which
-/// names the same fields `name` and `note`.
-#[derive(serde::Deserialize)]
-struct Exported {
-    track_id: String,
-    #[serde(default, alias = "name")]
-    track_name: String,
-    #[serde(default)]
-    artists: Vec<String>,
-    /// Already plain text, and preferred when it is there.
-    #[serde(default)]
-    note_text: Option<String>,
-    #[serde(default, alias = "note")]
-    note_html: Option<String>,
-    #[serde(default)]
-    updated_at: String,
-    #[serde(default)]
-    image_url: Option<String>,
-}
-
-#[derive(serde::Deserialize)]
-struct Export {
-    #[serde(default)]
-    notes: Vec<Exported>,
-}
-
-/// Reads an export from My Song Notes into `notes`, the newer of the two
-/// notes for a song winning, and answers how many landed.
-///
-/// The export has no album and no track length, so those stay empty until
-/// the song plays here and the note is written again.
-pub fn import(notes: &mut Notes, path: &Path) -> anyhow::Result<usize> {
-    let text = std::fs::read_to_string(path)?;
-    let export: Export = serde_json::from_str(&text)?;
-    let now = jiff::Timestamp::now().to_string();
-    let mut landed = 0;
-    for row in export.notes {
-        if row.track_id.is_empty() {
-            continue;
-        }
-        let written = match row.note_text {
-            Some(text) if !text.trim().is_empty() => text.trim().to_string(),
-            _ => strip_html(row.note_html.as_deref().unwrap_or_default()),
-        };
-        if written.is_empty() {
-            continue;
-        }
-        let uri = format!("spotify:track:{}", row.track_id);
-        let updated_at = if row.updated_at.trim().is_empty() {
-            now.clone()
-        } else {
-            row.updated_at
-        };
-        let note = Note {
-            text: written,
-            updated_at,
-            track: TrackInfo {
-                title: row.track_name,
-                artists: row.artists,
-                album: String::new(),
-                art_url: row.image_url.filter(|url| !url.is_empty()),
-                duration_ms: 0,
-            },
-        };
-        if notes.merge(&uri, note) {
-            landed += 1;
+/// The desktop editor is plain text, so a note written here is plain text
+/// with line breaks. Bold and italic written in the browser survive being
+/// read here, but not being written back: the note becomes what the
+/// editor showed.
+pub fn text_to_html(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    for character in text.chars() {
+        match character {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\n' => out.push_str("<br>"),
+            '\r' => {}
+            _ => out.push(character),
         }
     }
-    Ok(landed)
+    out
 }
 
 #[cfg(test)]
@@ -457,6 +544,143 @@ mod tests {
         assert!(notes.is_empty());
     }
 
+    /// An emptied note is kept, empty, until the server has been told.
+    #[test]
+    fn an_emptied_note_waits_to_be_deleted_everywhere() {
+        let mut notes = Notes::default();
+        notes.set("spotify:track:a", "words", info(), now());
+        notes.mark_sent("spotify:track:a", "2026-09-03T18:22:10.512Z");
+        assert!(!notes.has_pending());
+        notes.remove("spotify:track:a");
+        assert!(notes.is_empty(), "it is gone from the page");
+        assert!(notes.has_pending(), "but the deletion is still to be sent");
+        assert_eq!(notes.pending().len(), 1);
+        notes.mark_sent("spotify:track:a", "");
+        assert!(!notes.has_pending());
+        assert!(notes.get("spotify:track:a").is_none());
+    }
+
+    /// A note keeps the time the server gave it, so the next write can
+    /// offer that back as the version it saw.
+    #[test]
+    fn a_sent_note_keeps_the_servers_time() {
+        let mut notes = Notes::default();
+        notes.set("spotify:track:a", "first", info(), now());
+        assert!(notes.get("spotify:track:a").unwrap().pending);
+        notes.mark_sent("spotify:track:a", "2026-09-03T18:22:10.512Z");
+        let note = notes.get("spotify:track:a").unwrap();
+        assert!(!note.pending);
+        assert_eq!(note.updated_at, "2026-09-03T18:22:10.512Z");
+        notes.set("spotify:track:a", "second", info(), now());
+        let note = notes.get("spotify:track:a").unwrap();
+        assert!(note.pending);
+        assert_eq!(
+            note.updated_at, "2026-09-03T18:22:10.512Z",
+            "an edit does not invent a new version"
+        );
+    }
+
+    fn server_note(text: &str, at: &str) -> Note {
+        Note {
+            text: text.into(),
+            updated_at: at.into(),
+            pending: false,
+            track: info(),
+        }
+    }
+
+    /// A note written here and not yet sent survives the server's list; a
+    /// note that has been sent takes the server's words.
+    #[test]
+    fn unsent_notes_win_and_sent_notes_follow_the_server() {
+        let mut notes = Notes::default();
+        notes.set(
+            "spotify:track:unsent",
+            "written on the plane",
+            info(),
+            now(),
+        );
+        notes.set("spotify:track:sent", "old words", info(), now());
+        notes.mark_sent("spotify:track:sent", "2026-09-01T00:00:00Z");
+
+        notes.apply_server_list(vec![
+            (
+                "spotify:track:unsent".into(),
+                server_note("what the server has", "2026-09-02T00:00:00Z"),
+            ),
+            (
+                "spotify:track:sent".into(),
+                server_note("new words", "2026-09-04T00:00:00Z"),
+            ),
+        ]);
+
+        assert_eq!(
+            notes.text("spotify:track:unsent"),
+            "written on the plane",
+            "an unsent note is never overwritten"
+        );
+        assert!(notes.get("spotify:track:unsent").unwrap().pending);
+        assert_eq!(notes.text("spotify:track:sent"), "new words");
+        assert_eq!(
+            notes.get("spotify:track:sent").unwrap().updated_at,
+            "2026-09-04T00:00:00Z"
+        );
+    }
+
+    /// A note the server no longer has was deleted on another device, so
+    /// it goes here too, unless it is the one still waiting to be sent.
+    #[test]
+    fn a_note_deleted_elsewhere_goes_here_too() {
+        let mut notes = Notes::default();
+        notes.set("spotify:track:gone", "deleted on the phone", info(), now());
+        notes.mark_sent("spotify:track:gone", "2026-09-01T00:00:00Z");
+        notes.set("spotify:track:mine", "still going", info(), now());
+
+        notes.apply_server_list(Vec::new());
+
+        assert!(notes.get("spotify:track:gone").is_none());
+        assert_eq!(notes.text("spotify:track:mine"), "still going");
+    }
+
+    /// Notes are for songs, so only a track URI has an id to key one by.
+    #[test]
+    fn only_a_song_has_somewhere_to_keep_a_note() {
+        assert_eq!(
+            track_id("spotify:track:4uLU6hMCjMI75M1A2tKUQC"),
+            Some("4uLU6hMCjMI75M1A2tKUQC")
+        );
+        assert_eq!(track_id("spotify:episode:abc"), None);
+        assert_eq!(track_id("spotify:track:"), None);
+        assert_eq!(track_id("spotify:local:a:b:c:1"), None);
+        assert_eq!(track_id("4uLU6hMCjMI75M1A2tKUQC"), None);
+    }
+
+    /// What the editor holds becomes markup the browser can show.
+    #[test]
+    fn plain_lines_become_the_web_editors_markup() {
+        assert_eq!(text_to_html("drop at 1:04"), "drop at 1:04");
+        assert_eq!(text_to_html("one\ntwo"), "one<br>two");
+        assert_eq!(
+            text_to_html("Tom & Jerry \"live\""),
+            "Tom &amp; Jerry &quot;live&quot;"
+        );
+        assert_eq!(text_to_html("2 < 3 > 1"), "2 &lt; 3 &gt; 1");
+        assert_eq!(text_to_html("one\r\ntwo"), "one<br>two", "no stray returns");
+    }
+
+    /// A note written here, sent, and read back is the same note.
+    #[test]
+    fn a_note_survives_the_round_trip_through_the_server() {
+        for written in [
+            "drop at 1:04",
+            "one\ntwo\nthree",
+            "Tom & Jerry \"live\", 2 < 3",
+            "a line\n\na paragraph later",
+        ] {
+            assert_eq!(strip_html(&text_to_html(written)), written);
+        }
+    }
+
     /// A file written by a later version keeps the fields this one knows.
     #[test]
     fn a_file_with_fields_from_the_future_still_loads() {
@@ -511,7 +735,7 @@ mod tests {
         assert_eq!(uris, vec!["spotify:track:new", "spotify:track:old"]);
     }
 
-    /// An import only replaces a note that is older than the one imported.
+    /// Merging only replaces a note that is older than the one merged in.
     #[test]
     fn merging_keeps_whichever_note_is_newer() {
         let mut notes = Notes::default();
@@ -524,6 +748,7 @@ mod tests {
         let older = Note {
             text: "from the web".into(),
             updated_at: "2026-01-01T00:00:00Z".into(),
+            pending: false,
             track: info(),
         };
         assert!(!notes.merge("spotify:track:a", older));
@@ -531,6 +756,7 @@ mod tests {
         let newer = Note {
             text: "from the web".into(),
             updated_at: "2026-09-01T00:00:00Z".into(),
+            pending: false,
             track: info(),
         };
         assert!(notes.merge("spotify:track:a", newer));
@@ -574,73 +800,11 @@ mod tests {
         assert_eq!(timestamps("1:04")[0].1, 64_000);
     }
 
-    /// The export from the web app's Settings page lands as notes.
+    /// A note from the web app never overwrites a note written here more
+    /// recently, even though the web app's times carry fractional seconds
+    /// and Fastpotify's do not.
     #[test]
-    fn an_export_from_the_web_app_lands_as_notes() {
-        let dir = std::env::temp_dir().join(format!("fastpotify-import-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("song-notes.json");
-        std::fs::write(
-            &path,
-            r#"{
-              "exported_at": "2026-09-03T18:30:00.000Z",
-              "count": 3,
-              "notes": [
-                {
-                  "track_id": "4uLU6hMCjMI75M1A2tKUQC",
-                  "track_name": "Long Way Home",
-                  "artists": ["Marconi Union"],
-                  "spotify_url": "https://open.spotify.com/track/4uLU6hMCjMI75M1A2tKUQC",
-                  "note_html": "<p>drop at <b>1:04</b></p>",
-                  "note_text": "drop at 1:04",
-                  "updated_at": "2026-09-03T18:22:10.512Z"
-                },
-                {
-                  "track_id": "onlyhtml",
-                  "track_name": "Tides",
-                  "artists": [],
-                  "note_html": "<p>second verse</p>",
-                  "updated_at": "2026-08-01T00:00:00.000Z"
-                },
-                {
-                  "track_id": "empty",
-                  "track_name": "Nothing",
-                  "note_html": "<p><br></p>",
-                  "updated_at": "2026-08-01T00:00:00.000Z"
-                }
-              ]
-            }"#,
-        )
-        .unwrap();
-
-        let mut notes = Notes::default();
-        assert_eq!(
-            import(&mut notes, &path).unwrap(),
-            2,
-            "the blank one is not a note"
-        );
-        assert_eq!(
-            notes.text("spotify:track:4uLU6hMCjMI75M1A2tKUQC"),
-            "drop at 1:04"
-        );
-        assert_eq!(
-            notes.text("spotify:track:onlyhtml"),
-            "second verse",
-            "html is used when there is no plain text"
-        );
-        let note = notes.get("spotify:track:4uLU6hMCjMI75M1A2tKUQC").unwrap();
-        assert_eq!(note.track.title, "Long Way Home");
-        assert_eq!(note.track.artists, vec!["Marconi Union".to_string()]);
-
-        // Importing the same file again changes nothing.
-        assert_eq!(import(&mut notes, &path).unwrap(), 0);
-        let _ = std::fs::remove_dir_all(dir);
-    }
-
-    /// An import never overwrites a note written here more recently, even
-    /// though the web app's times carry fractional seconds and ours do not.
-    #[test]
-    fn an_import_leaves_a_newer_local_note_alone() {
+    fn a_web_note_leaves_a_newer_local_note_alone() {
         let mut notes = Notes::default();
         notes.set(
             "spotify:track:a",
@@ -651,12 +815,14 @@ mod tests {
         let older = Note {
             text: "from the web".into(),
             updated_at: "2026-09-03T18:22:10.999Z".into(),
+            pending: false,
             track: info(),
         };
         assert!(!notes.merge("spotify:track:a", older));
         let newer = Note {
             text: "from the web".into(),
             updated_at: "2026-09-03T18:22:11.001Z".into(),
+            pending: false,
             track: info(),
         };
         assert!(notes.merge("spotify:track:a", newer));
@@ -664,7 +830,7 @@ mod tests {
 
     /// The web editor's markup comes out as the lines it stood for.
     #[test]
-    fn imported_html_becomes_plain_lines() {
+    fn web_html_becomes_plain_lines() {
         assert_eq!(
             strip_html("<p>drop at <b>1:04</b></p><p>mix out after 3:30</p>"),
             "drop at 1:04\nmix out after 3:30"

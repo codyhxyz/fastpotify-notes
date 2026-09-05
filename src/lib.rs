@@ -27,6 +27,7 @@ pub mod media_controls;
 pub mod milkdrop;
 pub mod model;
 pub mod notes;
+pub mod notes_sync;
 pub mod opener;
 pub mod paths;
 pub mod player;

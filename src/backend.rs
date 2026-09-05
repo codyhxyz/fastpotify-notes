@@ -498,6 +498,14 @@ pub enum Command {
     },
     /// Resolve user ids to display names through the streaming session.
     UserNames(Vec<String>),
+    /// Every note this account has, from My Song Notes.
+    NotesList,
+    /// One song's note, from My Song Notes.
+    NotesGet {
+        track_id: String,
+    },
+    /// Write one song's note to My Song Notes. An empty note deletes it.
+    NotesPut(Box<crate::notes_sync::PutRequest>),
 }
 
 pub struct LyricsRequest {
@@ -552,6 +560,22 @@ pub enum Event {
     /// The verified personal Web API app, or `None` when it is disabled.
     WebApp {
         client_id: Option<String>,
+    },
+    /// Every note My Song Notes has for this account.
+    NotesList {
+        result: Result<Vec<crate::notes_sync::Row>, crate::notes_sync::SyncError>,
+    },
+    /// One song's note, `None` when nothing is written for it.
+    NotesGet {
+        track_id: String,
+        result: Result<Option<crate::notes_sync::Row>, crate::notes_sync::SyncError>,
+    },
+    /// How a write ended. `sent` is the markup that was offered, so a note
+    /// typed into again while the write was in flight is not marked sent.
+    NotesPut {
+        track_id: String,
+        sent: String,
+        result: Result<crate::notes_sync::PutOutcome, crate::notes_sync::SyncError>,
     },
 }
 
@@ -924,6 +948,9 @@ impl Worker {
                         .await
                 }
                 Command::UserNames(ids) => self.fetch_user_names(ids),
+                Command::NotesList => self.notes_list(),
+                Command::NotesGet { track_id } => self.notes_get(track_id),
+                Command::NotesPut(request) => self.notes_put(*request),
                 Command::ConfigurePersonalWebApp(client_id) => {
                     self.configure_personal_web_app(client_id)
                 }
@@ -1569,6 +1596,70 @@ impl Worker {
             };
             let _ = events.send(Event::Lyrics {
                 uri: request.uri,
+                result,
+            });
+            waker.wake();
+        });
+    }
+
+    // ---- notes ------------------------------------------------------------
+
+    /// The Spotify session the notes API is asked with. A personal app is
+    /// preferred when there is one, because its quota is the account's own.
+    fn notes_client(&self) -> Option<Arc<crate::api::client::ApiClient>> {
+        self.api.client_for(Operation::UserData).ok()
+    }
+
+    fn notes_list(&self) {
+        let Some(client) = self.notes_client() else {
+            return;
+        };
+        let http = self.http.clone();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = crate::notes_sync::list(&http, &client).await;
+            match &result {
+                Ok(rows) => log::info!("notes: {} from songnotes", rows.len()),
+                Err(error) => log::warn!("notes: could not list them: {error}"),
+            }
+            let _ = events.send(Event::NotesList { result });
+            waker.wake();
+        });
+    }
+
+    fn notes_get(&self, track_id: String) {
+        let Some(client) = self.notes_client() else {
+            return;
+        };
+        let http = self.http.clone();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = crate::notes_sync::get(&http, &client, &track_id).await;
+            if let Err(error) = &result {
+                log::warn!("notes: could not read one: {error}");
+            }
+            let _ = events.send(Event::NotesGet { track_id, result });
+            waker.wake();
+        });
+    }
+
+    fn notes_put(&self, request: crate::notes_sync::PutRequest) {
+        let Some(client) = self.notes_client() else {
+            return;
+        };
+        let http = self.http.clone();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = crate::notes_sync::put(&http, &client, &request).await;
+            if let Err(error) = &result {
+                log::warn!("notes: could not write one: {error}");
+            }
+            let _ = events.send(Event::NotesPut {
+                track_id: request.track_id,
+                sent: request.html,
                 result,
             });
             waker.wake();

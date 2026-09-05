@@ -43,6 +43,8 @@ const RESTART_BEFORE_PREVIOUS: u32 = 3_000;
 const NOTE_SETTLE: Duration = Duration::from_secs(1);
 /// Shortest gap between two writes of the notes file.
 const NOTES_SAVE_INTERVAL: Duration = Duration::from_secs(2);
+/// How long to wait before offering an unsent note to songnotes again.
+const NOTES_RETRY_INTERVAL: Duration = Duration::from_secs(30);
 
 const TOAST_LIFETIME: Duration = Duration::from_millis(3200);
 /// Match other interface animations. egui subtracts the predicted frame time
@@ -318,8 +320,16 @@ pub struct App {
     pub note_chips: Vec<(String, u32)>,
     /// The notes page's search box.
     pub notes_query: String,
-    /// An export from My Song Notes waiting for an account to land in.
-    import_notes: Option<std::path::PathBuf>,
+    /// Songs whose note is on its way to songnotes, so the same write does
+    /// not go twice.
+    notes_sending: std::collections::HashSet<String>,
+    /// When to offer the unsent notes again after a write did not land.
+    notes_retry_at: Option<Instant>,
+    /// A write has failed since the last one that worked, so the hint says
+    /// the notes are waiting rather than on their way.
+    notes_offline: bool,
+    /// songnotes refused the Spotify sign-in; said once, not every write.
+    notes_signin_warned: bool,
     pub show_devices: bool,
     pub toasts: Vec<Toast>,
     pub actions: Vec<Action>,
@@ -613,7 +623,10 @@ impl App {
             last_notes_save: Instant::now(),
             note_chips: Vec::new(),
             notes_query: String::new(),
-            import_notes: None,
+            notes_sending: std::collections::HashSet::new(),
+            notes_retry_at: None,
+            notes_offline: false,
+            notes_signin_warned: false,
             lyrics_uri: None,
             lyrics: Loadable::NotLoaded,
             lyrics_following: true,
@@ -1355,6 +1368,34 @@ impl App {
                     self.set_user_name(id, name);
                 }
                 Event::WebApp { client_id } => self.web_app = client_id,
+                Event::NotesList { result } => match result {
+                    Ok(rows) => self.apply_notes_list(rows),
+                    Err(crate::notes_sync::SyncError::Unauthorized) => {
+                        if !self.notes_signin_warned {
+                            self.notes_signin_warned = true;
+                            self.toast_error("Notes sync needs a Spotify sign-in");
+                        }
+                    }
+                    Err(crate::notes_sync::SyncError::Failed(_)) => self.notes_offline = true,
+                },
+                Event::NotesGet { track_id, result } => match result {
+                    Ok(row) => {
+                        let uri = format!("spotify:track:{track_id}");
+                        self.apply_note(&uri, row.and_then(|row| row.note()));
+                    }
+                    Err(crate::notes_sync::SyncError::Unauthorized) => {
+                        if !self.notes_signin_warned {
+                            self.notes_signin_warned = true;
+                            self.toast_error("Notes sync needs a Spotify sign-in");
+                        }
+                    }
+                    Err(crate::notes_sync::SyncError::Failed(_)) => self.notes_offline = true,
+                },
+                Event::NotesPut {
+                    track_id,
+                    sent,
+                    result,
+                } => self.handle_notes_put(track_id, sent, result),
                 Event::UpdateAvailable { version, url } => {
                     let notice = crate::updates::Release { version, url };
                     if self.update.as_ref() != Some(&notice) {
@@ -1832,10 +1873,10 @@ impl App {
         self.note_uri = None;
         self.note_buffer.clear();
         self.note_buffer_dirty = false;
-        if let Some(path) = self.import_notes.take() {
-            self.import_notes_from(&path);
-        }
+        self.notes_sending.clear();
         self.follow_note();
+        // The file is a cache; songnotes has the notes themselves.
+        self.request_notes_list();
     }
 
     /// Forgets the notes in memory without touching the file: they belong
@@ -1848,6 +1889,9 @@ impl App {
         self.note_buffer_dirty = false;
         self.note_chips.clear();
         self.notes_query.clear();
+        self.notes_sending.clear();
+        self.notes_retry_at = None;
+        self.notes_offline = false;
     }
 
     /// What the note should remember about the song it belongs to. The
@@ -1887,13 +1931,19 @@ impl App {
         let text = std::mem::take(&mut self.note_buffer);
         self.notes.set(&uri, &text, track, jiff::Timestamp::now());
         self.note_buffer = text;
+        self.push_note(&uri);
     }
 
     /// Keeps the editor on the playing song, committing what was written
     /// about the one before it. A keystroke in the last second holds the
     /// swap until the writer stops.
     fn follow_note(&mut self) {
-        let playing = self.now_playing().map(|now| now.uri);
+        // Notes are for songs. An episode, an ad, or a local file has no
+        // track id, and the panel says so instead of offering an editor.
+        let playing = self
+            .now_playing()
+            .map(|now| now.uri)
+            .filter(|uri| crate::notes::track_id(uri).is_some());
         if self.note_uri == playing {
             return;
         }
@@ -1908,10 +1958,16 @@ impl App {
             .as_deref()
             .map(|uri| self.notes.text(uri).to_string())
             .unwrap_or_default();
-        self.note_uri = playing;
+        self.note_uri = playing.clone();
         self.note_buffer_dirty = false;
         self.last_note_edit = None;
         self.rescan_note_chips();
+        // The panel is what makes a note worth asking about song by song.
+        if self.show_notes_panel
+            && let Some(uri) = playing
+        {
+            self.request_note(&uri);
+        }
     }
 
     fn save_notes(&mut self) {
@@ -1932,26 +1988,226 @@ impl App {
         self.save_notes();
     }
 
-    /// Reads an export from My Song Notes once there is an account to
-    /// read it into. The account id only exists after Spotify answers with
-    /// the profile, so this waits rather than guessing at start-up.
-    pub fn import_notes_later(&mut self, path: std::path::PathBuf) {
-        log::info!("importing notes from {} once signed in", path.display());
-        self.import_notes = Some(path);
+    // ---- notes in My Song Notes -----------------------------------------
+
+    /// Asks songnotes for every note this account has. Sent when the
+    /// account arrives, when the panel opens, and when the notes page is
+    /// opened, because another device may have written since.
+    fn request_notes_list(&mut self) {
+        if self.offline || self.notes_loaded_for.is_none() {
+            return;
+        }
+        self.backend.send(Command::NotesList);
     }
 
-    fn import_notes_from(&mut self, path: &std::path::Path) {
-        match crate::notes::import(&mut self.notes, path) {
-            Ok(0) => self.toast("Those notes are already here".to_string()),
-            Ok(count) => {
-                log::info!("imported {count} notes from {}", path.display());
-                self.toast(format!("Imported {count} notes"));
+    /// Asks songnotes for one song's note.
+    fn request_note(&mut self, uri: &str) {
+        if self.offline || self.notes_loaded_for.is_none() {
+            return;
+        }
+        let Some(track_id) = crate::notes::track_id(uri) else {
+            return;
+        };
+        self.backend.send(Command::NotesGet {
+            track_id: track_id.to_string(),
+        });
+    }
+
+    /// What the note should tell songnotes about its song, so a note
+    /// written here has its artwork in the web app's library. The playing
+    /// song knows the most; an older note offers what it remembers, and
+    /// the server keeps whatever it already had for the rest.
+    fn note_meta(&self, uri: &str) -> crate::notes_sync::Meta {
+        let mut meta = crate::notes_sync::Meta {
+            track_url: crate::notes::track_id(uri)
+                .map(|id| format!("https://open.spotify.com/track/{id}")),
+            ..Default::default()
+        };
+        if let Some(now) = self.now_playing().filter(|now| now.uri == uri) {
+            meta.name = Some(now.title);
+            meta.artists = Some(now.artists.iter().map(|a| a.name.clone()).collect());
+            // Only when every artist has an id: the web app pairs the two
+            // lists by position, so a short one links to the wrong artist.
+            if !now.artists.is_empty() && now.artists.iter().all(|a| a.id.is_some()) {
+                meta.artist_urls = Some(
+                    now.artists
+                        .iter()
+                        .filter_map(|a| a.id.as_deref())
+                        .map(|id| format!("https://open.spotify.com/artist/{id}"))
+                        .collect(),
+                );
+            }
+            meta.image_url = now.art_url.or(now.art_small);
+            meta.album_url = now
+                .album_id
+                .map(|id| format!("https://open.spotify.com/album/{id}"));
+            return meta;
+        }
+        if let Some(note) = self.notes.get(uri) {
+            if !note.track.title.is_empty() {
+                meta.name = Some(note.track.title.clone());
+            }
+            if !note.track.artists.is_empty() {
+                meta.artists = Some(note.track.artists.clone());
+            }
+            meta.image_url = note.track.art_url.clone();
+        }
+        meta
+    }
+
+    /// Offers one unsent note to songnotes. Does nothing for a note that
+    /// has already been sent or is on its way.
+    fn push_note(&mut self, uri: &str) {
+        if self.offline {
+            return;
+        }
+        let Some(track_id) = crate::notes::track_id(uri).map(str::to_string) else {
+            return;
+        };
+        let Some(note) = self.notes.get(uri).filter(|note| note.pending) else {
+            return;
+        };
+        if !self.notes_sending.insert(uri.to_string()) {
+            return;
+        }
+        let request = crate::notes_sync::PutRequest {
+            track_id,
+            html: crate::notes::text_to_html(&note.text),
+            expected_updated_at: Some(note.updated_at.clone()),
+            meta: self.note_meta(uri),
+        };
+        self.backend.send(Command::NotesPut(Box::new(request)));
+    }
+
+    /// Offers every unsent note again.
+    fn push_pending_notes(&mut self) {
+        if self.offline {
+            return;
+        }
+        for (uri, _) in self.notes.pending() {
+            self.push_note(&uri);
+        }
+        self.notes_retry_at = self
+            .notes
+            .has_pending()
+            .then(|| Instant::now() + NOTES_RETRY_INTERVAL);
+    }
+
+    /// What the panel and the page say while notes are waiting. Nothing at
+    /// all once everything has been sent.
+    pub fn notes_sync_hint(&self) -> Option<&'static str> {
+        if self.offline || !self.notes.has_pending() {
+            return None;
+        }
+        Some(if self.notes_offline {
+            "Offline, will send later"
+        } else {
+            "Syncing"
+        })
+    }
+
+    /// Puts songnotes' whole list in place, keeping anything written here
+    /// that has not been sent, and drops what was deleted elsewhere.
+    fn apply_notes_list(&mut self, rows: Vec<crate::notes_sync::Row>) {
+        self.notes_offline = false;
+        let incoming: Vec<(String, crate::notes::Note)> = rows
+            .iter()
+            .filter(|row| !row.track_id.is_empty())
+            .filter_map(|row| row.note().map(|note| (row.uri(), note)))
+            .collect();
+        self.notes.apply_server_list(incoming);
+        self.rehydrate_note_buffer();
+        self.save_notes();
+        // The list answering proves the network is back, so anything still
+        // waiting can go now instead of sitting out the backoff.
+        self.push_pending_notes();
+    }
+
+    /// Puts songnotes' copy of one note in place. An edit under way is left
+    /// alone: the writer is mid-sentence and the answer is already stale.
+    fn apply_note(&mut self, uri: &str, incoming: Option<crate::notes::Note>) {
+        self.notes_offline = false;
+        if self.note_uri.as_deref() == Some(uri) {
+            let mid_edit = self.note_buffer_dirty
+                || self
+                    .last_note_edit
+                    .is_some_and(|at| at.elapsed() < NOTE_SETTLE);
+            let same = incoming
+                .as_ref()
+                .map(|note| note.text.as_str())
+                .unwrap_or_default()
+                == self.note_buffer.trim();
+            if mid_edit && (same || self.notes.get(uri).is_some_and(|note| note.pending)) {
+                return;
+            }
+        }
+        if self.notes.apply_server(uri, incoming) {
+            self.rehydrate_note_buffer();
+            self.save_notes();
+        }
+    }
+
+    /// Puts the note the editor is on back in the editor, unless the
+    /// writer is in the middle of it.
+    fn rehydrate_note_buffer(&mut self) {
+        if self.note_buffer_dirty {
+            return;
+        }
+        let Some(uri) = self.note_uri.clone() else {
+            return;
+        };
+        let text = self.notes.text(&uri).to_string();
+        if text == self.note_buffer {
+            return;
+        }
+        self.note_buffer = text;
+        self.rescan_note_chips();
+    }
+
+    fn handle_notes_put(
+        &mut self,
+        track_id: String,
+        sent: String,
+        result: Result<crate::notes_sync::PutOutcome, crate::notes_sync::SyncError>,
+    ) {
+        let uri = format!("spotify:track:{track_id}");
+        self.notes_sending.remove(&uri);
+        match result {
+            Ok(crate::notes_sync::PutOutcome::Written { updated_at }) => {
+                self.notes_offline = false;
+                let held = self
+                    .notes
+                    .get(&uri)
+                    .map(|note| crate::notes::text_to_html(&note.text));
+                if held.as_deref() == Some(sent.as_str()) {
+                    self.notes.mark_sent(&uri, &updated_at);
+                } else {
+                    // Typed into again while that write was in flight.
+                    self.push_note(&uri);
+                }
                 self.save_notes();
             }
-            Err(error) => {
-                log::warn!("could not import {}: {error}", path.display());
-                self.toast_error(format!("Couldn't import those notes: {error}"));
+            Ok(crate::notes_sync::PutOutcome::Stale { row }) => {
+                self.notes_offline = false;
+                self.notes.take_server(&uri, row.and_then(|row| row.note()));
+                self.rehydrate_note_buffer();
+                self.save_notes();
+                self.toast("This note changed on another device. Showing the newer version.");
             }
+            Err(crate::notes_sync::SyncError::Unauthorized) => {
+                if !self.notes_signin_warned {
+                    self.notes_signin_warned = true;
+                    self.toast_error("Notes sync needs a Spotify sign-in");
+                }
+            }
+            Err(crate::notes_sync::SyncError::Failed(_)) => {
+                self.notes_offline = true;
+                self.notes_retry_at = Some(Instant::now() + NOTES_RETRY_INTERVAL);
+            }
+        }
+        if !self.notes.has_pending() {
+            self.notes_retry_at = None;
+            self.notes_offline = false;
         }
     }
 
@@ -2092,6 +2348,17 @@ impl App {
         self.follow_note();
         if self.notes.is_dirty() && self.last_notes_save.elapsed() > NOTES_SAVE_INTERVAL {
             self.save_notes();
+        }
+        // An unsent note is offered again on the backoff, and straight away
+        // when nothing is carrying it and no wait has been set.
+        if !self.offline && self.notes.has_pending() {
+            let due = match self.notes_retry_at {
+                Some(at) => Instant::now() >= at,
+                None => self.notes_sending.is_empty(),
+            };
+            if due {
+                self.push_pending_notes();
+            }
         }
     }
 
@@ -2661,8 +2928,8 @@ impl App {
                 self.request_contains(vec![format!("spotify:show:{id}")]);
             }
             Page::Queue => self.refresh_queue(true),
-            // The notes are already here, on disk.
-            Page::Notes => {}
+            // The file is only a cache; another device may have written.
+            Page::Notes => self.request_notes_list(),
             Page::Settings => {}
         }
     }
@@ -5863,6 +6130,10 @@ impl App {
                 self.show_queue_panel = false;
                 self.show_lyrics_panel = false;
                 self.follow_note();
+                self.request_notes_list();
+                if let Some(uri) = self.note_uri.clone() {
+                    self.request_note(&uri);
+                }
             }
             Action::NoteEdited => {
                 self.note_buffer_dirty = true;
@@ -5876,6 +6147,7 @@ impl App {
                     self.note_buffer_dirty = false;
                     self.rescan_note_chips();
                 }
+                self.push_note(&uri);
                 self.save_notes();
             }
             Action::ToggleDevicesPopup => {
@@ -8325,6 +8597,195 @@ mod tests {
         assert!(app.notes.is_empty());
         assert!(app.note_uri.is_none());
         assert!(app.note_buffer.is_empty());
+    }
+
+    /// Puts an episode in front of the editor, which has nowhere to keep
+    /// a note.
+    fn now_showing_episode(app: &mut App, id: &str) {
+        app.resume_track = Some(format!("spotify:episode:{id}"));
+    }
+
+    /// Notes belong to songs. A podcast episode does not get one, and the
+    /// editor does not carry the last song's note onto it.
+    #[test]
+    fn an_episode_has_nowhere_to_keep_a_note() {
+        let mut app = headless_app();
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "about the song".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+
+        now_showing_episode(&mut app, "ep1");
+        app.follow_note();
+        assert!(app.note_uri.is_none(), "an episode is not a song");
+        assert!(app.note_buffer.is_empty());
+        assert_eq!(app.notes.text("spotify:track:one"), "about the song");
+    }
+
+    /// A note written here waits, and says so, until songnotes takes it.
+    #[test]
+    fn an_unsent_note_says_it_is_waiting() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.notes_loaded_for = Some("me".into());
+        now_showing(&mut app, "one");
+        app.follow_note();
+        assert_eq!(
+            app.notes_sync_hint(),
+            None,
+            "nothing written, nothing to say"
+        );
+
+        app.note_buffer = "drop at 1:04".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.commit_note();
+        assert!(app.notes.has_pending());
+        assert_eq!(app.notes_sync_hint(), Some("Syncing"));
+
+        app.handle_notes_put(
+            "one".into(),
+            crate::notes::text_to_html("drop at 1:04"),
+            Err(crate::notes_sync::SyncError::Failed("no network".into())),
+        );
+        assert_eq!(app.notes_sync_hint(), Some("Offline, will send later"));
+        assert!(app.notes_retry_at.is_some(), "it will be offered again");
+
+        app.handle_notes_put(
+            "one".into(),
+            crate::notes::text_to_html("drop at 1:04"),
+            Ok(crate::notes_sync::PutOutcome::Written {
+                updated_at: "2026-09-04T12:00:00.000Z".into(),
+            }),
+        );
+        assert!(!app.notes.has_pending());
+        assert_eq!(app.notes_sync_hint(), None);
+        assert_eq!(
+            app.notes.get("spotify:track:one").unwrap().updated_at,
+            "2026-09-04T12:00:00.000Z"
+        );
+        assert!(app.notes_retry_at.is_none());
+    }
+
+    /// A note typed into again while the write was in flight is not marked
+    /// sent: what landed on the server is not what is held here.
+    #[test]
+    fn a_note_edited_mid_write_stays_unsent() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.notes_loaded_for = Some("me".into());
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "second thought".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.commit_note();
+
+        app.handle_notes_put(
+            "one".into(),
+            crate::notes::text_to_html("first thought"),
+            Ok(crate::notes_sync::PutOutcome::Written {
+                updated_at: "2026-09-04T12:00:00.000Z".into(),
+            }),
+        );
+        assert!(
+            app.notes.has_pending(),
+            "the newer words still have to go out"
+        );
+        assert_eq!(app.notes.text("spotify:track:one"), "second thought");
+    }
+
+    /// Somebody wrote from another device. The newer note replaces this
+    /// one and the editor shows it.
+    #[test]
+    fn a_note_written_elsewhere_replaces_this_one() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.notes_loaded_for = Some("me".into());
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "written here".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.commit_note();
+
+        let row: crate::notes_sync::Row = serde_json::from_str(
+            r#"{
+              "track_id": "one",
+              "note": "<p>written on the phone</p>",
+              "updated_at": "2026-09-04T12:00:00.000Z",
+              "name": "Song one"
+            }"#,
+        )
+        .unwrap();
+        app.handle_notes_put(
+            "one".into(),
+            crate::notes::text_to_html("written here"),
+            Ok(crate::notes_sync::PutOutcome::Stale { row: Some(row) }),
+        );
+        assert_eq!(app.notes.text("spotify:track:one"), "written on the phone");
+        assert_eq!(app.note_buffer, "written on the phone");
+        assert!(!app.notes.has_pending());
+        assert!(
+            app.toasts
+                .iter()
+                .any(|toast| toast.message.contains("another device")),
+            "the writer is told why the words changed"
+        );
+    }
+
+    /// The list from songnotes is what the notes are, except for anything
+    /// written here that has not been sent.
+    #[test]
+    fn the_server_list_replaces_everything_that_has_been_sent() {
+        let mut app = headless_app();
+        app.backend.set_offline(true);
+        app.notes_loaded_for = Some("me".into());
+        now_showing(&mut app, "one");
+        app.follow_note();
+        app.note_buffer = "not sent yet".into();
+        app.note_buffer_dirty = true;
+        app.last_note_edit = Some(Instant::now() - Duration::from_secs(5));
+        app.commit_note();
+        app.notes.set(
+            "spotify:track:gone",
+            "deleted on the phone",
+            crate::notes::TrackInfo::default(),
+            jiff::Timestamp::now(),
+        );
+        app.notes
+            .mark_sent("spotify:track:gone", "2026-09-01T00:00:00Z");
+
+        let rows: Vec<crate::notes_sync::Row> = serde_json::from_str(
+            r#"[
+              {"track_id": "one", "note": "<p>the server's words</p>",
+               "updated_at": "2026-09-04T12:00:00.000Z"},
+              {"track_id": "two", "note": "<p>from the web</p>",
+               "updated_at": "2026-09-03T12:00:00.000Z", "name": "Song two",
+               "artists": ["Somebody"], "image_url": "https://i.scdn.co/image/abc"}
+            ]"#,
+        )
+        .unwrap();
+        app.apply_notes_list(rows);
+
+        assert_eq!(
+            app.notes.text("spotify:track:one"),
+            "not sent yet",
+            "an unsent note is never overwritten"
+        );
+        assert_eq!(app.notes.text("spotify:track:two"), "from the web");
+        let two = app.notes.get("spotify:track:two").unwrap();
+        assert_eq!(two.track.title, "Song two");
+        assert_eq!(
+            two.track.art_url.as_deref(),
+            Some("https://i.scdn.co/image/abc"),
+            "the page draws the artwork the server kept"
+        );
+        assert!(
+            app.notes.get("spotify:track:gone").is_none(),
+            "a note the server no longer has was deleted elsewhere"
+        );
     }
 
     fn cached_playlist_row(uri: &str) -> crate::api::models::PlaylistItem {

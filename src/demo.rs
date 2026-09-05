@@ -626,6 +626,7 @@ pub fn sample_notes(app: &mut App) {
             crate::notes::Note {
                 text: text.to_string(),
                 updated_at: at.to_string(),
+                pending: false,
                 track: crate::notes::TrackInfo {
                     title: track.name.clone(),
                     artists: track.artists.iter().map(|a| a.name.clone()).collect(),
