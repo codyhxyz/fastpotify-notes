@@ -26,11 +26,16 @@ first. Search runs over the song, the artists, the album, and the note
 itself. Click a row to play that song with its note open again; right
 click to delete the note.
 
-Notes are kept per account in the state directory and never leave this
-computer. They are the one thing there that Spotify cannot give back, so
-they are worth a backup. If you have notes in
-[My Song Notes](https://songnotes.codyh.xyz), export them from its
-Settings page and run `fastpotify --import-notes song-notes.json` once.
+Notes are stored in [My Song Notes](https://songnotes.codyh.xyz), the web
+app at songnotes.codyh.xyz, under the same Spotify account you signed in
+with. Write one here and it is there; write one there and it is here the
+next time the panel or the page opens. Notes are for songs, so a podcast
+episode has nowhere to keep one.
+
+A copy is kept per account in the state directory so the notes are on
+screen before the first answer comes back, and so a note written with no
+network is not lost: it is sent as soon as there is one, and the panel
+says so until it has been.
 
 ## Recent
 

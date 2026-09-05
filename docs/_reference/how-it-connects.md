@@ -42,11 +42,12 @@ adds a separate Development Mode quota. See
   cache instead of downloading the Spotify image a second time. Linux MPRIS
   carries the Spotify artwork URL for the desktop to resolve.
 - Lyrics, in the cache directory, for a month.
-- Fastpotify has no telemetry, analytics, or hosted service. When the lyrics
-  panel is open and Spotify has no lyrics, it sends the track's artist, title,
-  album, and length to [lrclib.net](https://lrclib.net). It also checks
-  api.github.com once a day for updates. You can turn off update checks in
-  Settings.
+- A copy of your notes, in the state directory. The notes themselves live in
+  My Song Notes; see [Notes](#notes) below.
+- Fastpotify has no telemetry and no analytics. When the lyrics panel is open
+  and Spotify has no lyrics, it sends the track's artist, title, album, and
+  length to [lrclib.net](https://lrclib.net). It also checks api.github.com
+  once a day for updates. You can turn off update checks in Settings.
 
 ## When Spotify pushes back
 
@@ -66,6 +67,34 @@ rule out duplicates. Once confirmed, the new rows appear locally at once. A
 successful write advances the cached playlist to Spotify's returned snapshot
 instead of downloading the playlist again. If Spotify cannot answer the scan,
 Fastpotify preserves the requested edit and lets the write report its result.
+
+## Notes
+
+Notes are kept in [My Song Notes](https://songnotes.codyh.xyz) at
+songnotes.codyh.xyz, so the same notes are in Fastpotify, in the browser,
+and on a phone. Fastpotify is a client of it and holds only a copy.
+
+Three requests go there, each carrying your Spotify Web API access token as
+a bearer token. The server asks Spotify who that token belongs to and answers
+with that account's notes; nothing else identifies you, and no separate
+sign-in is needed.
+
+| Request | When | What it carries |
+| --- | --- | --- |
+| `GET /api/notes/list` | Signing in, opening the notes panel, opening the notes page | The token |
+| `GET /api/notes?track_id=` | Every song change while the panel is open | The token and the track id |
+| `PUT /api/notes` | A second after you stop typing, and when the panel closes, the song changes, or the app quits | The token, the note as HTML, the version last seen, and the song's name, artists, artist and album and track links, and cover URL |
+
+An empty note is a deleted note, so a deletion is the same `PUT`. If the
+server holds a newer version of that note, it refuses the write, Fastpotify
+takes the newer one, and says so. A write that cannot reach the server is
+kept and offered again every thirty seconds until it lands.
+
+Notes are for songs. An episode, an advert, or a local file has no track id,
+so the panel says so instead of offering an editor.
+
+Anyone holding your Spotify access token can read and write your notes. That
+is the same trust Fastpotify already places in that token.
 
 ## Receivers on the local network
 

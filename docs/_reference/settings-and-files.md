@@ -18,7 +18,7 @@ Fastpotify follows each platform's conventions. On Linux:
 | Playback credential | `~/.local/state/fastpotify/credentials/` | Yes, you approve playback again |
 | Last session | `~/.local/state/fastpotify/session.json` | Yes |
 | Play history | `~/.local/state/fastpotify/history.json` | Yes |
-| Notes | `~/.local/state/fastpotify/notes/<account-id>.json` | No, you lose your notes |
+| Notes cache and outbox | `~/.local/state/fastpotify/notes/<account-id>.json` | Yes, it is fetched again; unsent edits would be lost |
 | Audio cache | `~/.cache/fastpotify/audio/` | Always |
 | Artwork cache | `~/.cache/fastpotify/art/` | Always |
 | Lyrics cache | `~/.cache/fastpotify/lyrics/` | Always |
@@ -26,9 +26,11 @@ Fastpotify follows each platform's conventions. On Linux:
 | Last run's log | `~/.local/state/fastpotify/fastpotify.log` | Always |
 | Crash log | `~/.local/state/fastpotify/panic.log` | Always |
 
-Your notes are the one file here that nothing can rebuild: everything
-else comes back from Spotify or from your preferences, and that one is
-your own writing. Back it up like any other document.
+The notes themselves live in
+[My Song Notes](https://songnotes.codyh.xyz), not here. That file is a
+copy, so the notes are on screen before the first answer comes back, and
+an outbox, so a note written with no network is not lost. Deleting it
+loses only an edit that has not been sent yet.
 
 Clearing caches never signs you out; credentials live in *state*, not
 *cache*. Web API token files are written with owner-only permissions.
@@ -113,8 +115,6 @@ fastpotify [OPTIONS] [LINK]
                         open.spotify.com address
   --device-name <NAME>  Spotify Connect name for this session
   -v, --verbose         More logs from librespot and the API client
-  --import-notes <PATH> Read a My Song Notes export into your notes at the
-                        next sign-in
 ```
 
 A link goes to the running Fastpotify when there is one, which then opens
