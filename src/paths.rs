@@ -161,6 +161,13 @@ impl AppDirs {
         self.state.join("history.json")
     }
 
+    /// What was written about each song, per account. Unlike everything
+    /// else here, this can hold the listener's own writing that has not
+    /// reached My Song Notes yet. See [`crate::notes`].
+    pub fn notes_file(&self, account_id: &str) -> PathBuf {
+        self.state.join("notes").join(account_file_name(account_id))
+    }
+
     pub fn shared_web_token_file(&self) -> PathBuf {
         self.state.join("shared_web_api_token.json")
     }
