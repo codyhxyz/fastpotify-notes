@@ -264,11 +264,14 @@ out, or a reconnection that gives up stops it.
   prefixes refresh through the existing Web API grant, one page at a time,
   while the saved rows remain visible. Manual refresh starts immediately.
   Like and Unlike are kept over lagging reads until Spotify confirms them.
-- Spotifast has no telemetry, analytics, or hosted service. When the lyrics
+- A copy of your notes, per account, in the state directory. The notes
+  themselves live in My Song Notes; see [Notes](#notes) below.
+- Spotifast has no telemetry and no analytics. When the lyrics
   panel is open and neither Spotify nor a local file has lyrics, it sends
   the track's artist, title, album, and length to
   [lrclib.net](https://lrclib.net). It also checks
-  api.github.com once a day for updates. You can turn off automatic checks in
+  api.github.com once a day for updates, for this fork's own releases
+  (codyhxyz/fastpotify-notes) and never upstream's. You can turn off automatic checks in
   Settings, or request one there at any time. On macOS, **Check for Updates**
   is also in the application menu. On a connection the system reports as
   metered (Windows), the daily check, automatic downloads, and the large cover
@@ -499,6 +502,48 @@ unchanged. Spotify can refuse changes to playlists you do not own.
 
 On Linux the file picker uses a desktop portal, with Zenity as a fallback.
 Install your desktop's file chooser portal or Zenity if no picker opens.
+
+## Notes
+
+Notes are kept in [My Song Notes](https://songnotes.codyh.xyz) at
+songnotes.codyh.xyz, so the same notes are in Spotifast, in the browser,
+and on a phone. Spotifast is a client of it and holds only a copy.
+
+Four requests go there, each carrying your Spotify Web API access token as
+a bearer token: the token of the personal app you registered, or of the
+shared grant from before 0.14.2 if that is what is signed in. The server
+asks Spotify who that token belongs to and answers with that account's
+notes; nothing else identifies you, and no separate sign-in is needed. A
+token the server refuses is refreshed once and tried again. Without a Web
+API sign-in there is no token to send: Spotifast says once that notes sync
+needs a Spotify sign-in, and keeps what you write to send later.
+
+| Request | When | What it carries |
+| --- | --- | --- |
+| `GET /api/notes/list` | Signing in, opening the notes panel, opening the notes page | The token |
+| `GET /api/notes?track_id=` | Every song change while the panel is open | The token and the track id |
+| `PUT /api/notes` | A second after you stop typing, and when the panel closes, the song changes, or the app quits | The token, the note as HTML, the version last seen, and the song's name, artists, artist and album and track links, and cover URL |
+| `PATCH /api/notes` | Right after a list that contained notes with no song details, up to 200 songs at a time | The token and the songs' names, artists, artist and album and track links, and cover URLs, and never a note |
+
+Some notes were written before My Song Notes kept a song's name and cover,
+so a list can arrive with nothing to draw a row with: Spotifast asks Spotify
+`GET /v1/tracks` about those songs, fifty ids at a time, and shows a song it
+no longer knows as Unknown song. Those details then go back to the server as
+a `PATCH /api/notes`, which carries the songs and nothing else, so the note
+and the time it was last written stay exactly as they were and every device
+lists them filled in from then on.
+
+An empty note is a deleted note, so a deletion is the same `PUT`. If the
+server holds a newer version of that note, it refuses the write, Spotifast
+takes the newer one, and says so. A write that cannot reach the server is
+kept and offered again every thirty seconds until it lands, and at once
+when a list comes back.
+
+Notes are for songs. An episode, an advert, or a local file has no track id,
+so the panel says so instead of offering an editor.
+
+Anyone holding your Spotify access token can read and write your notes. That
+is the same trust Spotifast already places in that token.
 
 ## Receivers on the local network
 

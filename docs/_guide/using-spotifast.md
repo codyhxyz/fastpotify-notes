@@ -324,6 +324,7 @@ Winamp skins do not yet have equivalent accessibility coverage.
 | `B` | Like or unlike the playing song |
 | `S` / `R` | Shuffle / cycle repeat |
 | `Q` | Queue panel, or the queue column in full screen |
+| `N` | Notes panel |
 | `F` | Enter or leave full screen lyrics |
 | `V` | Full screen lyrics: MilkDrop or the cover's art behind the words |
 | `N` / `P` | Full screen lyrics: next or previous MilkDrop preset |
@@ -402,6 +403,13 @@ can open (on Windows, a loopback port that answers only requests carrying a
 random token). Use the command rather than the channel itself.
 
 ## Updates
+
+This fork asks only for its own releases, at
+[codyhxyz/fastpotify-notes](https://github.com/codyhxyz/fastpotify-notes),
+and never offers or installs an upstream Spotifast release, which would
+replace it with a build that has no notes. Until the fork publishes a
+release there is nothing to update to; a check by hand says it could not
+check for updates.
 
 The Windows installer, Mac app, AppImage, and portable Windows and Linux
 downloads update themselves. When Spotifast finds a new release, it
@@ -746,6 +754,37 @@ album or artist it plays from.
 The panel needs playback on this computer, since only that session can read
 it. In a very narrow window the people button gives way so the playback
 controls keep their room; widen the window to bring it back.
+
+## Notes
+
+`N`, or the pencil in the player bar, after the people button, opens a
+panel that follows whatever is playing. Write in it and it saves itself;
+there is nothing to press. Move to another song and the panel moves with
+you, unless you are mid-sentence, in which case it waits until you stop.
+It takes the place of the Queue, Lyrics or Listening activity panel on the
+right, and they take its place in turn. In a narrow window the pencil is
+the first button to give way; `N` still opens the panel.
+
+Any time you write (`1:04`, `12:05`) appears as a button above the text.
+Press it and the song jumps there.
+
+**All notes** opens the page of everything you have written, newest
+first. Search runs over the song, the artists, the album, and the note
+itself. Click a row to play that song with its note open again; right
+click to delete the note.
+
+Notes are stored in [My Song Notes](https://songnotes.codyh.xyz), the web
+app at songnotes.codyh.xyz, under the same Spotify account you signed in
+with. Write one here and it is there; write one there and it is here the
+next time the panel or the page opens. Notes are for songs, so a podcast
+episode has nowhere to keep one. Syncing uses your Web API sign-in; without
+one, Spotifast says once that notes sync needs a Spotify sign-in, and what
+you write waits on this computer.
+
+A copy is kept per account in the state directory so the notes are on
+screen before the first answer comes back, and so a note written with no
+network is not lost: it is sent as soon as there is one, and the panel
+says so until it has been.
 
 ## Sleep while playing
 

@@ -6,7 +6,8 @@ nav_order: 4
 
 Spotifast is a desktop app that runs entirely on your computer. It has no
 account of its own, no server, no telemetry, no analytics, and no advertising.
-Its author receives nothing about you or how you use it.
+Its author receives nothing about you or how you use it. This fork adds
+one service, My Song Notes, which keeps the notes you write; see below.
 
 This page covers the Spotifast app, version 0.8.0 and later. Earlier versions
 kept sign-ins in files instead of the system credential store; update to a
@@ -26,6 +27,9 @@ current release.
   directory. A copy started from the Windows ZIP keeps them, its state and
   its caches in `spotifast-data` next to it, so anyone who can read that
   folder, on a shared USB drive say, can read them.
+- **A copy of your notes.** One file per account in the state directory,
+  readable by you only, holding the notes as My Song Notes last sent them
+  and any you wrote that have not reached it yet.
 - **Caches.** Downloaded audio, artwork, lyrics and library metadata live in
   the cache directory and can be deleted at any time.
 - **Log.** `spotifast.log` records errors and diagnostics. It stays on your
@@ -61,7 +65,13 @@ Spotifast connects only to the services below.
   20-second lookup budget, respecting `Retry-After`; search can recover when
   the exact lookup is temporarily unavailable. A failed lookup can use older
   cached lyrics, but never caches an outage as a missing transcription.
-- **GitHub.** Once a day, Spotifast asks GitHub for the latest release. You
+- **My Song Notes.** The notes you write go to
+  [songnotes.codyh.xyz](https://songnotes.codyh.xyz) with your Spotify Web
+  API access token, which the server uses to ask Spotify whose notes they
+  are. Each note carries the song's name, artists, links and cover.
+  [How it connects](/how-it-connects/#notes) lists every request.
+- **GitHub.** Once a day, Spotifast asks GitHub for the latest release of
+  this fork, never upstream's. You
   can turn automatic checks off in Settings. Downloading an update, and the
   first opening of MilkDrop, also fetch files from GitHub. No Spotify data is
   sent.
