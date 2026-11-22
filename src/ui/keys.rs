@@ -45,6 +45,12 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
                 matches!(event, egui::Event::Key { key: Key::Q, pressed: true, modifiers, .. }
                     if modifiers.shift_only())
             });
+        // And Shift+N plays them next.
+        let notes_key_is_the_lists = songs_picked
+            && input.events.iter().any(|event| {
+                matches!(event, egui::Event::Key { key: Key::N, pressed: true, modifiers, .. }
+                    if modifiers.shift_only())
+            });
         let mut key = |modifiers: Modifiers, key: Key, action: Action| {
             if input.consume_key(modifiers, key) {
                 actions.push(action);
@@ -165,6 +171,11 @@ pub fn handle(app: &mut App, ctx: &egui::Context) {
                     key(Modifiers::NONE, Key::N, Action::MilkdropEffect(1));
                     key(Modifiers::NONE, Key::P, Action::MilkdropEffect(-1));
                 }
+            }
+            // After MilkDrop's: behind full screen lyrics, N is its next
+            // preset.
+            if !notes_key_is_the_lists {
+                key(Modifiers::NONE, Key::N, Action::ToggleNotesPanel);
             }
         }
     });
@@ -303,6 +314,7 @@ pub fn shortcuts(locale: Locale) -> Vec<(Cow<'static, str>, Cow<'static, str>)> 
         (keys("R"), gettext(locale, "Cycle repeat")),
         (keys("Q"), gettext(locale, "Show the queue")),
         (keys("L"), gettext(locale, "Show the lyrics")),
+        (keys("N"), gettext(locale, "Show the notes")),
         (keys("F"), gettext(locale, "Full screen lyrics")),
         #[cfg(feature = "milkdrop")]
         (
@@ -596,6 +608,7 @@ mod tests {
             (Key::R, Modifiers::NONE, Action::CycleRepeat),
             (Key::Q, Modifiers::NONE, Action::ToggleQueuePanel),
             (Key::L, Modifiers::NONE, Action::ToggleLyricsPanel),
+            (Key::N, Modifiers::NONE, Action::ToggleNotesPanel),
             (Key::Slash, Modifiers::NONE, Action::FocusSearch),
             (Key::F, Modifiers::NONE, Action::SetLyricsFullscreen(true)),
             (

@@ -1102,10 +1102,13 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
     {
         app.actions.push(Action::ToggleLyricsPanel);
     }
-    // The Listening activity button is the first to go in a narrow window,
-    // so it never crowds the transport.
-    let left = ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD);
-    if left - transport_right >= TRANSPORT_GAP
+    // The next button's left edge, which must keep clear of the transport.
+    let left = |ui: &egui::Ui| {
+        ui.min_rect().left() - ui.spacing().item_spacing.x - (18.0 + theme::ICON_BUTTON_PAD)
+    };
+    // The Listening activity button is the first of upstream's to go in a
+    // narrow window, so it never crowds the transport.
+    if left(ui) - transport_right >= TRANSPORT_GAP
         && theme::icon_button(
             ui,
             Icon::Users,
@@ -1121,6 +1124,25 @@ fn extras(app: &mut App, ui: &mut egui::Ui, now: Option<&NowPlaying>, transport_
         .clicked()
     {
         app.actions.push(Action::ToggleFriendsPanel);
+    }
+    // Notes come last, so they give way before anything else and every
+    // other button keeps the room it had; N opens them however narrow.
+    if left(ui) - transport_right >= TRANSPORT_GAP
+        && theme::icon_button(
+            ui,
+            Icon::SquarePen,
+            18.0,
+            if app.show_notes_panel {
+                palette.accent
+            } else {
+                palette.secondary
+            },
+            palette.text,
+            &gettext(app.locale, "Notes"),
+        )
+        .clicked()
+    {
+        app.actions.push(Action::ToggleNotesPanel);
     }
 }
 

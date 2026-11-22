@@ -24812,6 +24812,7 @@ mod tests {
         crate::demo::populate(&mut app);
         let mut shown_at = None;
         let mut button_at = None;
+        let mut notes_at = None;
         for width in (760..=1600).step_by(8) {
             let width = width as f32;
             let mut tree = None;
@@ -24849,7 +24850,20 @@ mod tests {
             } else {
                 assert!(button_at.is_none(), "it stays once shown, gone at {width}");
             }
-            if let Some(friends) = button("Listening activity") {
+            let friends = button("Listening activity");
+            // Notes come after Listening activity and give way first.
+            if let Some(notes) = button("Notes") {
+                notes_at.get_or_insert(width);
+                assert!(notes.y0 > 700.0, "in the player bar at {width}");
+                assert!(
+                    friends.is_some_and(|friends| notes.x1 <= friends.x0),
+                    "before Listening activity at {width}"
+                );
+                assert!(notes.x0 - repeat.x1 >= 10.0, "clear of Repeat at {width}");
+            } else {
+                assert!(notes_at.is_none(), "Notes stay once shown, gone at {width}");
+            }
+            if let Some(friends) = friends {
                 shown_at.get_or_insert(width);
                 assert!(friends.y0 > 700.0, "in the player bar at {width}");
                 assert!(friends.x1 <= lyrics.x0, "before Lyrics at {width}");
@@ -24860,6 +24874,7 @@ mod tests {
         }
         assert!(button_at.is_some_and(|width| width > 760.0 && width <= 840.0));
         assert!(shown_at.is_some_and(|width| Some(width) > button_at && width <= 920.0));
+        assert!(notes_at.is_some_and(|width| Some(width) > shown_at && width <= 1600.0));
         app.backend.shutdown();
     }
 

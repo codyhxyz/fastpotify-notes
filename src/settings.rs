@@ -332,6 +332,9 @@ pub struct Settings {
     pub sidebar_grid: bool,
     pub sidebar_width: f32,
     pub lyrics_width: f32,
+    /// Width of the notes panel. A settings file written before notes
+    /// existed takes the default, as every field here does.
+    pub notes_width: f32,
     pub queue_width: f32,
     /// Use compact single-line rows without cover art in track lists.
     pub tracklist_compact: bool,
@@ -527,6 +530,7 @@ impl Default for Settings {
             sidebar_grid: false,
             sidebar_width: 250.0,
             lyrics_width: 360.0,
+            notes_width: 360.0,
             queue_width: 360.0,
             tracklist_compact: false,
             middle_click_autoscroll: false,
