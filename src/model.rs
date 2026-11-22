@@ -1369,6 +1369,15 @@ pub enum Action {
     ToggleLyricsPanel,
     /// Show or hide what friends are listening to, in the right panel.
     ToggleFriendsPanel,
+    /// Show or hide the playing song's note, in the right panel.
+    ToggleNotesPanel,
+    /// Open the notes panel whether or not it is already open.
+    ShowNotesPanel,
+    /// The note editor's text changed. The panel edits the buffer itself,
+    /// because egui's editor needs the string; this is the bookkeeping.
+    NoteEdited,
+    /// Forget the note written for this URI.
+    DeleteNote(String),
     SetLyricsFullscreen(bool),
     LyricsLineShown(Option<usize>),
     FollowLyrics,

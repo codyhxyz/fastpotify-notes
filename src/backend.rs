@@ -891,6 +891,17 @@ pub enum Command {
     /// Read what friends are listening to through the streaming session,
     /// for the app's request generation.
     FriendActivity(u64),
+    /// Every note this account has, from My Song Notes.
+    NotesList,
+    /// One song's note, from My Song Notes.
+    NotesGet {
+        track_id: String,
+    },
+    /// Write one song's note to My Song Notes. An empty note deletes it.
+    NotesPut(Box<crate::notes_sync::PutRequest>),
+    /// Look up the songs behind these track ids, for notes that arrived
+    /// with no name and no cover, and tell My Song Notes what they are.
+    NotesHydrate(Vec<String>),
     LoadLikedSongsCache {
         generation: u64,
     },
@@ -1098,6 +1109,27 @@ pub enum Event {
         generation: u64,
         result: Result<Vec<session_reads::FriendActivity>, String>,
     },
+    /// Every note My Song Notes has for this account.
+    NotesList {
+        result: Result<Vec<crate::notes_sync::Row>, crate::notes_sync::SyncError>,
+    },
+    /// One song's note, `None` when nothing is written for it.
+    NotesGet {
+        track_id: String,
+        result: Result<Option<crate::notes_sync::Row>, crate::notes_sync::SyncError>,
+    },
+    /// How a write ended. `sent` is the markup that was offered, so a note
+    /// typed into again while the write was in flight is not marked sent.
+    NotesPut {
+        track_id: String,
+        sent: String,
+        result: Result<crate::notes_sync::PutOutcome, crate::notes_sync::SyncError>,
+    },
+    /// The songs looked up for notes that had none of their details, only
+    /// the ones Spotify still knows.
+    NotesHydrated(Vec<crate::api::models::Track>),
+    /// How many notes My Song Notes filled in from those songs.
+    NotesMetaSent(usize),
     /// A user id resolved to a display name and avatar (each `None` when
     /// nothing answers).
     UserName {
@@ -2798,6 +2830,10 @@ impl Worker {
                 Command::UserNames(ids) => self.fetch_user_names(ids),
                 Command::PlayCounts { uri, generation } => self.fetch_play_counts(uri, generation),
                 Command::FriendActivity(generation) => self.fetch_friend_activity(generation),
+                Command::NotesList => self.notes_list(),
+                Command::NotesGet { track_id } => self.notes_get(track_id),
+                Command::NotesPut(request) => self.notes_put(*request),
+                Command::NotesHydrate(ids) => self.notes_hydrate(ids),
                 Command::LoadLikedSongsCache { generation } => {
                     if let Some(account) = self.api.account() {
                         let account_id = account.as_str().to_string();
@@ -4952,6 +4988,121 @@ impl Worker {
         });
     }
 
+    // ---- notes ------------------------------------------------------------
+
+    fn notes_list(&self) {
+        let api = self.api.clone();
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = match notes_client(&api, http).await {
+                Ok((http, client)) => crate::notes_sync::list(&http, &client).await,
+                Err(error) => Err(error),
+            };
+            match &result {
+                Ok(rows) => log::info!("notes: {} from songnotes", rows.len()),
+                Err(error) => log::warn!("notes: could not list them: {error}"),
+            }
+            let _ = events.send(Event::NotesList { result });
+            waker.wake();
+        });
+    }
+
+    fn notes_get(&self, track_id: String) {
+        let api = self.api.clone();
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = match notes_client(&api, http).await {
+                Ok((http, client)) => crate::notes_sync::get(&http, &client, &track_id).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = &result {
+                log::warn!("notes: could not read one: {error}");
+            }
+            let _ = events.send(Event::NotesGet { track_id, result });
+            waker.wake();
+        });
+    }
+
+    fn notes_put(&self, request: crate::notes_sync::PutRequest) {
+        let api = self.api.clone();
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let result = match notes_client(&api, http).await {
+                Ok((http, client)) => crate::notes_sync::put(&http, &client, &request).await,
+                Err(error) => Err(error),
+            };
+            if let Err(error) = &result {
+                log::warn!("notes: could not write one: {error}");
+            }
+            let _ = events.send(Event::NotesPut {
+                track_id: request.track_id,
+                sent: request.html,
+                result,
+            });
+            waker.wake();
+        });
+    }
+
+    /// Looks up the songs whose notes carry nothing to draw a row with,
+    /// then tells My Song Notes what they are so no other device has to
+    /// ask again.
+    ///
+    /// One task does both. The lookups are sequential because they run
+    /// against the same rate limiter as everything else, and filling in
+    /// old notes must never be what makes the playing song wait.
+    fn notes_hydrate(&self, ids: Vec<String>) {
+        let api = self.api.clone();
+        let http = self.http.client();
+        let events = self.events.clone();
+        let waker = self.waker.clone();
+        tokio::spawn(async move {
+            let (http, client) = match notes_client(&api, http).await {
+                Ok(found) => found,
+                Err(error) => {
+                    log::warn!("notes: could not look the songs up: {error}");
+                    return;
+                }
+            };
+            let asked = ids.len();
+            let mut found: Vec<crate::api::models::Track> = Vec::new();
+            for batch in crate::api::client::track_batches(&ids) {
+                match client.tracks(batch).await {
+                    // Spotify leaves a hole where it no longer knows an id.
+                    // Those notes keep no name and are shown as unknown.
+                    Ok(answer) => found.extend(answer.into_iter().flatten()),
+                    Err(error) => {
+                        log::warn!("notes: could not look the songs up: {error}");
+                        break;
+                    }
+                }
+            }
+            log::info!("notes: hydrated {} of {asked} from Spotify", found.len());
+            let entries: Vec<crate::notes_sync::MetaPatch> = found
+                .iter()
+                .filter_map(crate::notes_sync::MetaPatch::for_track)
+                .collect();
+            let _ = events.send(Event::NotesHydrated(found));
+            waker.wake();
+            if entries.is_empty() {
+                return;
+            }
+            match crate::notes_sync::patch_meta(&http, &client, &entries).await {
+                Ok(updated) => {
+                    log::info!("notes: sent metadata for {updated}");
+                    let _ = events.send(Event::NotesMetaSent(updated));
+                }
+                Err(error) => log::warn!("notes: could not send the songs' details: {error}"),
+            }
+            waker.wake();
+        });
+    }
+
     // ---- api ----------------------------------------------------------------
 
     fn cancel_search(&mut self) {
@@ -5274,6 +5425,19 @@ async fn read_new_releases(
     }
     log::debug!("Spotify route operation=NewReleases source=web-api");
     Ok(albums)
+}
+
+/// The Web API session My Song Notes is asked with, and the HTTP client that
+/// asks. Notes belong to the account, so they go where the account's own
+/// data does: the personal app when there is one. With no Web API sign-in
+/// there is no token to give My Song Notes, which counts as its 401.
+async fn notes_client(
+    api: &ApiGateway,
+    http: Result<reqwest::Client, String>,
+) -> Result<(reqwest::Client, Arc<crate::api::client::ApiClient>), crate::notes_sync::SyncError> {
+    let client = api.client_for(Operation::UserData).await?;
+    let http = http.map_err(crate::notes_sync::SyncError::Failed)?;
+    Ok((http, client))
 }
 
 /// The latest albums and singles of the first followed artists, merged.

@@ -24,6 +24,13 @@ const MAX_IN_FLIGHT: usize = 6;
 const MAX_BACKGROUND_IN_FLIGHT: usize = 4;
 const RATE_LIMIT_RETRIES: u32 = 3;
 const MAX_RETRY_AFTER: Duration = Duration::from_secs(30);
+/// How many song ids `GET /v1/tracks` takes at once.
+pub const TRACKS_PER_REQUEST: usize = 50;
+
+/// The ids split into the batches `GET /v1/tracks` takes.
+pub fn track_batches(ids: &[String]) -> Vec<&[String]> {
+    ids.chunks(TRACKS_PER_REQUEST).collect()
+}
 
 #[derive(Clone, Debug, Error)]
 pub enum ApiError {
@@ -103,6 +110,12 @@ impl TokenProvider {
     async fn invalidate(&self, rejected: &str) {
         let Self::Web(tokens) = self;
         let _ = tokens.access_token(Some(rejected)).await;
+    }
+
+    /// The current token, refreshed first when `rejected` is still it.
+    async fn token(&self, rejected: Option<&str>) -> Result<String> {
+        let Self::Web(tokens) = self;
+        tokens.access_token(rejected).await
     }
 }
 
@@ -430,6 +443,18 @@ impl ApiClient {
     /// grant. This is never sent to the Web API under the playback identity.
     pub(crate) async fn home_context_token(&self) -> Result<String> {
         self.provider()?.access_token().await
+    }
+
+    /// The Web API access token this session holds, refreshed when it is
+    /// close to expiry, or minted fresh when `rejected`, the token My Song
+    /// Notes just answered 401 to, is still the current one.
+    ///
+    /// Only [`crate::notes_sync`] needs the token itself: My Song Notes
+    /// takes it as a bearer token to work out whose notes these are.
+    /// Everything else goes through the typed calls here, which put the
+    /// token on the request themselves.
+    pub(crate) async fn notes_access_token(&self, rejected: Option<&str>) -> Result<String> {
+        self.provider()?.token(rejected).await
     }
 
     /// A new authorization gets its own provider and request cooldown. An old
@@ -1305,6 +1330,24 @@ impl ApiClient {
         self.get(&format!("/tracks/{id}"), &[]).await
     }
 
+    /// Several songs at once, at most [`TRACKS_PER_REQUEST`] of them.
+    ///
+    /// The answer keeps the shape of the question: one entry per id asked
+    /// for, and `None` where Spotify no longer knows the id. Losing that
+    /// would leave the caller unable to tell which song went missing.
+    pub async fn tracks(&self, ids: &[String]) -> Result<Vec<Option<Track>>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let asked: Vec<&str> = ids
+            .iter()
+            .take(TRACKS_PER_REQUEST)
+            .map(String::as_str)
+            .collect();
+        let several: SeveralTracks = self.get("/tracks", &[("ids", asked.join(","))]).await?;
+        Ok(several.tracks)
+    }
+
     pub async fn episode(&self, id: &str) -> Result<Episode> {
         self.get(&format!("/episodes/{id}"), &[]).await
     }
@@ -1330,6 +1373,89 @@ impl ApiClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ids_are_asked_for_fifty_at_a_time() {
+        let ids: Vec<String> = (0..120).map(|n| format!("id{n:03}")).collect();
+        let batches = track_batches(&ids);
+        assert_eq!(batches.len(), 3, "120 ids is three requests, not one");
+        assert_eq!(batches[0].len(), TRACKS_PER_REQUEST);
+        assert_eq!(batches[1].len(), TRACKS_PER_REQUEST);
+        assert_eq!(batches[2].len(), 20);
+        assert_eq!(batches[0][0], "id000");
+        assert_eq!(batches[2][19], "id119");
+        let flat: Vec<&String> = batches.iter().flat_map(|batch| batch.iter()).collect();
+        assert_eq!(flat.len(), ids.len(), "every id is asked about once");
+
+        let exact: Vec<String> = (0..50).map(|n| format!("id{n}")).collect();
+        assert_eq!(track_batches(&exact).len(), 1, "fifty is still one request");
+        assert!(
+            track_batches(&[]).is_empty(),
+            "nothing to ask is no request"
+        );
+    }
+
+    /// My Song Notes is handed the Web API token the session holds, and
+    /// without a sign-in there is none to hand it. A refused token that a
+    /// refresh has already replaced is not refreshed again.
+    #[tokio::test]
+    async fn the_notes_token_is_the_sessions_own() {
+        let http = reqwest::Client::builder().no_proxy().build().unwrap();
+        let client = ApiClient::new(
+            http.clone(),
+            Arc::new(NetActivity::default()),
+            10,
+            10,
+            ApiSource::Personal,
+        );
+        assert!(matches!(
+            client.notes_access_token(None).await,
+            Err(ApiError::NotSignedIn)
+        ));
+        client.set_token_provider(Some(TokenProvider::Web(WebTokens::new(
+            http,
+            crate::auth::StoredToken {
+                access_token: "test-only".into(),
+                expires_at: u64::MAX,
+                ..Default::default()
+            },
+            crate::credentials::Store::in_memory(crate::paths::AppDirs {
+                config: std::env::temp_dir().join("unused-notes-token/config"),
+                state: std::env::temp_dir().join("unused-notes-token/state"),
+                cache: std::env::temp_dir().join("unused-notes-token/cache"),
+            })
+            .lease(crate::credentials::Slot::Personal),
+            ApiSource::Personal,
+            Arc::new(|_| {}),
+        ))));
+        assert_eq!(client.notes_access_token(None).await.unwrap(), "test-only");
+        assert_eq!(
+            client
+                .notes_access_token(Some("an-older-token"))
+                .await
+                .unwrap(),
+            "test-only"
+        );
+    }
+
+    /// Spotify answers with a null where it no longer knows an id, and the
+    /// answer still lines up with the ids that were asked for.
+    #[test]
+    fn a_song_spotify_no_longer_knows_stays_a_hole_in_the_answer() {
+        let several: SeveralTracks = serde_json::from_str(
+            r#"{"tracks": [{"id": "a", "name": "First"}, null, {"id": "c", "name": "Third"}]}"#,
+        )
+        .expect("the answer reads");
+        assert_eq!(several.tracks.len(), 3, "the hole is kept, not closed");
+        assert!(several.tracks[1].is_none());
+        let found: Vec<String> = several
+            .tracks
+            .into_iter()
+            .flatten()
+            .map(|track| track.name)
+            .collect();
+        assert_eq!(found, vec!["First".to_string(), "Third".to_string()]);
+    }
 
     /// An unrelated Pathfinder request can finish while another reply is slow.
     #[tokio::test]
