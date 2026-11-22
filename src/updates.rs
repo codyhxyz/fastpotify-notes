@@ -32,8 +32,14 @@ use std::sync::Mutex;
 /// The version this build is.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// This fork's own releases, the only ones it ever offers. Upstream's would
+/// replace this build with one that has no notes in it. Until the fork
+/// publishes a release, GitHub answers the daily check with a 404, which
+/// the backend logs at debug level and nobody sees.
+const REPOSITORY: &str = "codyhxyz/fastpotify-notes";
+
 /// Where the release files are.
-const DOWNLOADS: &str = "https://github.com/crmne/spotifast/releases/download";
+const DOWNLOADS: &str = "https://github.com/codyhxyz/fastpotify-notes/releases/download";
 
 type UpdaterCache = Mutex<Option<(crate::settings::ProxyConfig, Updater)>>;
 static UPDATER: UpdaterCache = Mutex::new(None);
@@ -52,7 +58,7 @@ pub const CONFIG: UpdateConfig = UpdateConfig {
     // next one.
     appimage: true,
     ..UpdateConfig::new(
-        "crmne/spotifast",
+        REPOSITORY,
         "Spotifast",
         "spotifast",
         env!("CARGO_PKG_VERSION"),
@@ -427,6 +433,45 @@ mod tests {
         assert_eq!(CONFIG.current_version, env!("CARGO_PKG_VERSION"));
     }
 
+    /// A transport that answers everything with a 404, the way GitHub
+    /// answers for a repository with no release yet, and keeps every
+    /// address it was asked for.
+    #[derive(Clone, Default)]
+    struct NoRelease(std::sync::Arc<Mutex<Vec<String>>>);
+
+    impl fastframe_update::Transport for NoRelease {
+        fn get(
+            &self,
+            request: &fastframe_update::Request<'_>,
+        ) -> anyhow::Result<fastframe_update::Response> {
+            self.0.lock().unwrap().push(request.url.to_owned());
+            Ok(fastframe_update::Response {
+                status: 404,
+                location: None,
+                body: Box::new(std::io::empty()),
+            })
+        }
+    }
+
+    /// The fork only ever asks its own repository. With no release
+    /// published there, the check fails, which the daily check keeps to
+    /// the log, and it never goes on to ask upstream, whose release would
+    /// replace this build with one that has no notes in it.
+    #[test]
+    fn only_this_forks_releases_are_ever_asked_for() {
+        assert_eq!(CONFIG.repository, "codyhxyz/fastpotify-notes");
+        assert!(DOWNLOADS.starts_with("https://github.com/codyhxyz/fastpotify-notes/"));
+        let asked = NoRelease::default();
+        let updater = Updater::new(CONFIG, asked.clone());
+        assert!(updater.check().is_err(), "no release is not an update");
+        let asked = asked.0.lock().unwrap();
+        assert_eq!(
+            *asked,
+            ["https://api.github.com/repos/codyhxyz/fastpotify-notes/releases/latest"],
+            "one question, to this fork"
+        );
+    }
+
     #[test]
     fn updates_require_the_release_signing_key() {
         assert!(
@@ -567,7 +612,7 @@ mod tests {
                     saved
                 ),
                 Some(Route::Rpm {
-                    command: "sudo dnf install https://github.com/crmne/spotifast/releases/download/v0.18.0/spotifast-0.18.0-1.aarch64.rpm".into()
+                    command: "sudo dnf install https://github.com/codyhxyz/fastpotify-notes/releases/download/v0.18.0/spotifast-0.18.0-1.aarch64.rpm".into()
                 }),
                 "{vendor:?}"
             );
@@ -591,7 +636,7 @@ mod tests {
             deb,
             Route::Deb {
                 download:
-                    "https://github.com/crmne/spotifast/releases/download/v0.18.0/spotifast_0.18.0_arm64.deb"
+                    "https://github.com/codyhxyz/fastpotify-notes/releases/download/v0.18.0/spotifast_0.18.0_arm64.deb"
                         .into(),
                 command: "sudo apt install ~/Downloads/spotifast_0.18.0_arm64.deb".into(),
             }
@@ -607,7 +652,7 @@ mod tests {
         assert_eq!(
             flatpak.download(),
             Some(
-                "https://github.com/crmne/spotifast/releases/download/v0.18.0/spotifast-v0.18.0-x86_64.flatpak"
+                "https://github.com/codyhxyz/fastpotify-notes/releases/download/v0.18.0/spotifast-v0.18.0-x86_64.flatpak"
             )
         );
         assert_eq!(

@@ -2,7 +2,13 @@
   <img src="docs/assets/images/logo.svg" alt="Spotifast logo" width="88" height="88">
 </p>
 
-<h1 align="center">Spotifast</h1>
+<h1 align="center">Spotifast Notes</h1>
+
+A fork of [Spotifast](https://github.com/crmne/spotifast) by
+[crmne](https://github.com/crmne) that adds a note for every song. Everything
+else is upstream Spotifast, and the app is still called Spotifast. It checks
+this fork's own releases for updates and never upstream's, which would
+replace it with a build that has no notes in it.
 
 <p align="center"><strong>Spotify, native and fast.</strong><br>A lightweight music app for Linux, macOS, and Windows.</p>
 

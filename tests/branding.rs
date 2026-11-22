@@ -44,6 +44,10 @@ fn the_command_reports_its_name_and_passes_the_update_version_check() {
 #[test]
 fn no_file_carries_the_old_name() {
     let old = ["fast", "potify"].concat();
+    // This fork's repository was named before the rename, and the updater
+    // asks for its releases by that name (src/updates.rs). The repository's
+    // name is allowed; the app's old name, anywhere else, is not.
+    let fork = ["codyhxyz/", "fast", "potify-notes"].concat();
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let allowed = [
         root.join("packaging/release-notes"),
@@ -80,7 +84,9 @@ fn no_file_carries_the_old_name() {
                 .unwrap()
                 .to_string_lossy()
                 .into_owned();
-            let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).to_lowercase();
+            let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap())
+                .to_lowercase()
+                .replace(&fork, "");
             if relative.to_lowercase().contains(&old) || text.contains(&old) {
                 found.push(relative);
             }
