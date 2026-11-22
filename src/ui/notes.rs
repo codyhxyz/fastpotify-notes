@@ -1,17 +1,21 @@
 //! What you have to say about the playing song, in a side panel that
 //! follows it.
 
-use egui::{Align, CornerRadius, Frame, Layout, Margin};
+use egui::{Align, CornerRadius, Frame, Layout, Margin, Rect, Sense, UiBuilder, Vec2, pos2, vec2};
 
 use crate::app::App;
-use crate::i18n::gettext;
-use crate::model::Action;
+use crate::i18n::{Locale, gettext};
+use crate::model::{Action, Page};
 use crate::theme::{self, Icon};
 
 use super::widgets;
 
 /// The size the note is written at.
 const NOTE_SIZE: f32 = 14.0;
+const ROW_HEIGHT: f32 = 64.0;
+const COVER: f32 = 40.0;
+/// Room on the right of a row for when the note was last written in.
+const WHEN_WIDTH: f32 = 96.0;
 
 pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
     let palette = app.palette;
@@ -58,6 +62,11 @@ pub fn side_panel(app: &mut App, ui: &mut egui::Ui) {
                 .clicked()
                 {
                     app.actions.push(Action::ToggleNotesPanel);
+                }
+                if theme::pill_button(ui, &palette, &gettext(app.locale, "All notes"), false)
+                    .clicked()
+                {
+                    app.actions.push(Action::Open(Page::Notes));
                 }
             });
         });
@@ -162,4 +171,253 @@ fn contents(app: &mut App, ui: &mut egui::Ui) {
                     }
                 });
         });
+}
+
+/// What a click on a row asked for.
+enum Picked {
+    Play,
+    Delete,
+}
+
+/// Every note written here, newest first, with a search over all of it.
+pub fn page(app: &mut App, ui: &mut egui::Ui) {
+    let palette = app.palette;
+    let locale = app.locale;
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        theme::text(
+            ui,
+            gettext(locale, "Notes"),
+            theme::bold(28.0),
+            palette.text,
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            let width = ui.available_width().clamp(160.0, 280.0);
+            widgets::search_field(
+                ui,
+                &palette,
+                locale,
+                egui::Id::new("notes-search"),
+                &mut app.notes_query,
+                &gettext(locale, "Search your notes"),
+                width,
+            );
+        });
+    });
+    if let Some(hint) = app.notes_sync_hint() {
+        theme::text(ui, hint, theme::regular(12.0), palette.secondary);
+    }
+    ui.add_space(12.0);
+
+    if app.notes.is_empty() {
+        widgets::empty_state(
+            ui,
+            &palette,
+            Icon::SquarePen,
+            &gettext(locale, "No notes yet"),
+            &gettext(
+                locale,
+                "Open the Notes panel while a song plays and start writing.",
+            ),
+        );
+        return;
+    }
+
+    let now = jiff::Timestamp::now();
+    let query = app.notes_query.trim().to_lowercase();
+    let mut picked: Option<(String, Picked)> = None;
+    let mut shown = 0;
+    for (uri, note) in app.notes.newest_first() {
+        if !matches(note, &query) {
+            continue;
+        }
+        shown += 1;
+        if let Some(pick) = row(ui, &palette, locale, app.backend.art(), note, now) {
+            picked = Some((uri.to_string(), pick));
+        }
+    }
+    if shown == 0 {
+        widgets::empty_state(
+            ui,
+            &palette,
+            Icon::Search,
+            &gettext(locale, "Nothing found"),
+            &gettext(locale, "No note mentions that."),
+        );
+    }
+    match picked {
+        Some((uri, Picked::Play)) => {
+            app.actions.push(Action::PlayUris {
+                uris: vec![uri],
+                index: 0,
+            });
+            app.actions.push(Action::ShowNotesPanel);
+        }
+        Some((uri, Picked::Delete)) => app.actions.push(Action::DeleteNote(uri)),
+        None => {}
+    }
+}
+
+/// Whether a note answers the search, over everything it holds. The list
+/// is tens to hundreds of notes, so this runs over the loaded list rather
+/// than through an index.
+fn matches(note: &crate::notes::Note, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
+    let holds = |text: &str| text.to_lowercase().contains(query);
+    holds(&note.text)
+        || holds(&note.track.title)
+        || holds(&note.track.album)
+        || note.track.artists.iter().any(|artist| holds(artist))
+}
+
+/// What the row calls the song. A note whose song Spotify would not
+/// name has nothing to show, and a `spotify:track:` URI is not a name.
+fn row_title(note: &crate::notes::Note, locale: Locale) -> String {
+    if note.track.title.is_empty() {
+        gettext(locale, "Unknown song").into_owned()
+    } else {
+        note.track.title.clone()
+    }
+}
+
+fn row(
+    ui: &mut egui::Ui,
+    palette: &theme::Palette,
+    locale: Locale,
+    art: &crate::images::ArtLoader,
+    note: &crate::notes::Note,
+    now: jiff::Timestamp,
+) -> Option<Picked> {
+    let width = ui.available_width();
+    let (rect, response) = ui.allocate_exact_size(vec2(width, ROW_HEIGHT), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return None;
+    }
+    if ui.rect_contains_pointer(rect) {
+        ui.painter().rect_filled(
+            rect,
+            CornerRadius::same(6),
+            palette
+                .surface_hover
+                .gamma_multiply(if palette.dark { 0.7 } else { 1.0 }),
+        );
+    }
+    let cover = Rect::from_center_size(
+        pos2(rect.left() + 8.0 + COVER / 2.0, rect.center().y),
+        Vec2::splat(COVER),
+    );
+    widgets::paint_cover(
+        ui,
+        palette,
+        note.track.art_url.as_deref(),
+        cover,
+        4.0,
+        Icon::Music,
+        Some(art),
+    );
+
+    let mut column = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                pos2(cover.right() + 12.0, rect.top() + 7.0),
+                pos2(rect.right() - WHEN_WIDTH, rect.bottom() - 7.0),
+            ))
+            .layout(Layout::top_down(Align::Min)),
+    );
+    column.spacing_mut().item_spacing.y = 1.0;
+    theme::text(
+        &mut column,
+        row_title(note, locale),
+        theme::medium(14.0),
+        palette.text,
+    );
+    if !note.track.artists.is_empty() {
+        theme::text(
+            &mut column,
+            note.track.artists.join(", "),
+            theme::regular(12.5),
+            palette.secondary,
+        );
+    }
+    theme::text(
+        &mut column,
+        note.summary(),
+        theme::regular(12.5),
+        palette.dim,
+    );
+
+    let mut when = ui.new_child(
+        UiBuilder::new()
+            .max_rect(Rect::from_min_max(
+                pos2(rect.right() - WHEN_WIDTH, rect.top()),
+                pos2(rect.right() - 10.0, rect.bottom()),
+            ))
+            .layout(Layout::right_to_left(Align::Center)),
+    );
+    theme::text(
+        &mut when,
+        crate::util::format_relative_date(locale, &note.updated_at, now),
+        theme::regular(12.0),
+        palette.secondary,
+    );
+
+    let mut picked = response.clicked().then_some(Picked::Play);
+    egui::Popup::context_menu(&response)
+        .frame(widgets::menu_frame(palette))
+        .show(|ui| {
+            ui.set_min_width(180.0);
+            if widgets::menu_item(
+                ui,
+                palette,
+                Some(Icon::Trash),
+                &gettext(locale, "Delete note"),
+            ) {
+                picked = Some(Picked::Delete);
+                ui.close();
+            }
+        });
+    picked
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A note whose song could not be looked up is shown as unknown, and
+    /// never as the URI it is filed under.
+    #[test]
+    fn a_note_with_no_song_is_shown_as_unknown() {
+        let mut note = crate::notes::Note {
+            text: "worth keeping".into(),
+            ..Default::default()
+        };
+        assert_eq!(row_title(&note, Locale::English), "Unknown song");
+        assert!(
+            !row_title(&note, Locale::English).contains("spotify:track:"),
+            "the URI is not something to read"
+        );
+        note.track.title = "Caramelldansen".into();
+        assert_eq!(row_title(&note, Locale::English), "Caramelldansen");
+    }
+
+    /// The search runs over the song, its artists, its album and the note.
+    #[test]
+    fn the_search_reads_everything_a_note_holds() {
+        let note = crate::notes::Note {
+            text: "The drop at 1:04".into(),
+            track: crate::notes::TrackInfo {
+                title: "Long Way Home".into(),
+                artists: vec!["Marconi Union".into()],
+                album: "Weightless".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for query in ["", "drop", "long way", "marconi", "weightless"] {
+            assert!(matches(&note, query), "{query}");
+        }
+        assert!(!matches(&note, "caramelldansen"));
+    }
 }

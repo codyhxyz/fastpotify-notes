@@ -8987,6 +8987,7 @@ mod tests {
         populate(&mut app);
         app.settings.queue_width = crate::theme::SIDE_PANEL_MIN_WIDTH;
         app.settings.lyrics_width = crate::theme::SIDE_PANEL_MIN_WIDTH;
+        app.settings.notes_width = crate::theme::SIDE_PANEL_MIN_WIDTH;
         app.lyrics = Loadable::Loaded(Some(sample_lyrics()));
         app.lyrics_following = false;
 
@@ -9049,6 +9050,11 @@ mod tests {
                 assert_same_row(&placed, "Lyrics", "Follow");
             }
         }
+        app.show_queue_panel = false;
+        app.show_lyrics_panel = false;
+        app.show_notes_panel = true;
+        let placed = drawn(&mut app);
+        assert_same_row(&placed, "Notes", "All notes");
         app.backend.shutdown();
     }
 
@@ -10176,6 +10182,7 @@ mod tests {
         );
         app.attach(&ctx);
         populate(&mut app);
+        sample_notes(&mut app);
         // These frames never advance the clock or take pictures.
         app.reveal_theme_changes = false;
 
@@ -10194,6 +10201,7 @@ mod tests {
             Page::Artist("art0".into()),
             Page::Show("sh0".into()),
             Page::Queue,
+            Page::Notes,
             Page::Settings,
         ];
         for page in pages {
@@ -10226,7 +10234,6 @@ mod tests {
         app.lyrics_fullscreen = None;
         app.show_lyrics_panel = false;
         let queue_was_open = app.show_queue_panel;
-        sample_notes(&mut app);
         app.actions.push(Action::ShowNotesPanel);
         frame(&ctx, &mut app);
         assert!(app.show_notes_panel && !app.show_queue_panel);

@@ -3810,7 +3810,8 @@ impl App {
                     self.refresh_queue(true);
                 }
             }
-            Page::Settings => {}
+            // Unsent notes are offered again on their own backoff.
+            Page::Notes | Page::Settings => {}
         }
     }
 
@@ -7068,6 +7069,8 @@ impl App {
                     self.refresh_queue(true);
                 }
             }
+            // The file is only a cache; another device may have written.
+            Page::Notes => self.request_notes_list(),
             Page::Settings => self.refresh_autostart(),
         }
     }

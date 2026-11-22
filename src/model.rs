@@ -126,6 +126,8 @@ pub enum Page {
     /// seed's URI.
     Radio(String),
     Queue,
+    /// Every note this account has written, searchable.
+    Notes,
     Settings,
 }
 
@@ -147,6 +149,7 @@ impl Page {
             Page::Show(id) => format!("show:{id}"),
             Page::Radio(seed) => format!("radio:{seed}"),
             Page::Queue => "queue".into(),
+            Page::Notes => "notes".into(),
             Page::Settings => "settings".into(),
         }
     }
@@ -163,6 +166,7 @@ impl Page {
             "podcasts" => Page::Podcasts,
             "episodes" => Page::Episodes,
             "queue" => Page::Queue,
+            "notes" => Page::Notes,
             "settings" => Page::Settings,
             other => {
                 let (kind, id) = other.split_once(':')?;
